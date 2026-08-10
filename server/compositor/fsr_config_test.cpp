@@ -6,9 +6,18 @@
 
 #include "fsr_config.h"
 
-#include <cassert>
 #include <cmath>
 #include <cstdlib>
+#include <stdexcept>
+
+namespace
+{
+void check(bool condition)
+{
+	if (!condition)
+		throw std::runtime_error("FSR configuration test check failed");
+}
+} // namespace
 
 int main()
 {
@@ -23,23 +32,23 @@ int main()
 	info.stream_eye_width = 960;
 	info.stream_eye_height = 1056;
 
-	assert((wivrn::fsr_output_dimensions(info) == std::array<uint32_t, 2>{2000, 2200}));
-	assert((wivrn::fsr_stream_dimensions(info) == std::array<uint32_t, 2>{1200, 1320}));
-	assert(std::abs(wivrn::fsr_rcas_sharpness_stops() - 0.4f) < 0.001f);
+	check((wivrn::fsr_output_dimensions(info) == std::array<uint32_t, 2>{2000, 2200}));
+	check((wivrn::fsr_stream_dimensions(info) == std::array<uint32_t, 2>{1200, 1320}));
+	check(std::abs(wivrn::fsr_rcas_sharpness_stops() - 0.4f) < 0.001f);
 
 	// One-to-one input stays on the normal path.
 	info.render_eye_width = info.native_eye_width;
 	info.render_eye_height = info.native_eye_height;
 	info.stream_eye_width = 1000;
 	info.stream_eye_height = 1100;
-	assert((wivrn::fsr_output_dimensions(info) == std::array<uint32_t, 2>{2000, 2200}));
-	assert((wivrn::fsr_stream_dimensions(info) == std::array<uint32_t, 2>{1000, 1100}));
+	check((wivrn::fsr_output_dimensions(info) == std::array<uint32_t, 2>{2000, 2200}));
+	check((wivrn::fsr_stream_dimensions(info) == std::array<uint32_t, 2>{1000, 1100}));
 
 	// More than four times the input area is outside FSR 1's supported range.
 	info.render_eye_width = 900;
 	info.render_eye_height = 900;
 	info.stream_eye_width = 720;
 	info.stream_eye_height = 720;
-	assert((wivrn::fsr_output_dimensions(info) == std::array<uint32_t, 2>{900, 900}));
-	assert((wivrn::fsr_stream_dimensions(info) == std::array<uint32_t, 2>{720, 720}));
+	check((wivrn::fsr_output_dimensions(info) == std::array<uint32_t, 2>{900, 900}));
+	check((wivrn::fsr_stream_dimensions(info) == std::array<uint32_t, 2>{720, 720}));
 }
