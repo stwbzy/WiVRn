@@ -93,6 +93,12 @@ void pacer::set_frame_duration(uint64_t frame_duration_ns)
 	this->frame_duration_ns = frame_duration_ns;
 }
 
+void pacer::set_stream_frame_multiplier(uint64_t multiplier)
+{
+	std::lock_guard lock(mutex);
+	stream_frame_multiplier = std::max<uint64_t>(1, multiplier);
+}
+
 void pacer::predict(
         int64_t & frame_id,
         int64_t & out_wake_up_time_ns,
@@ -131,14 +137,21 @@ void pacer::on_feedback(const wivrn::from_headset::feedback & feedback, const cl
 		return;
 
 	std::lock_guard lock(mutex);
-	auto & when = in_flight_frames[feedback.frame_index % in_flight_frames.size()];
-	if (when.frame_id != feedback.frame_index)
+	// In double-rate transport, even IDs are generated interval frames and
+	// odd IDs are the application frames tracked by this pacer.
+	if (stream_frame_multiplier > 1 && (feedback.frame_index % stream_frame_multiplier) != stream_frame_multiplier - 1)
+		return;
+	const auto app_frame_index = stream_frame_multiplier > 1
+	                                     ? (feedback.frame_index - (stream_frame_multiplier - 1)) / stream_frame_multiplier
+	                                     : feedback.frame_index;
+	auto & when = in_flight_frames[app_frame_index % in_flight_frames.size()];
+	if (when.frame_id != int64_t(app_frame_index))
 		return;
 
-	auto & times = frame_times[feedback.frame_index % frame_times.size()];
-	if (times.frame_id != feedback.frame_index)
+	auto & times = frame_times[app_frame_index % frame_times.size()];
+	if (times.frame_id != int64_t(app_frame_index))
 	{
-		times.frame_id = feedback.frame_index;
+		times.frame_id = app_frame_index;
 		times.present = when.present_ns;
 		times.decoded = 0;
 	}
@@ -146,7 +159,7 @@ void pacer::on_feedback(const wivrn::from_headset::feedback & feedback, const cl
 
 	if (feedback.stream_index == 0)
 	{
-		if (feedback.frame_index % 100 == 0)
+		if (app_frame_index % 100 == 0)
 		{
 			std::unique_lock lock(compute_mutex);
 			std::swap(frame_times, frame_times_compute);

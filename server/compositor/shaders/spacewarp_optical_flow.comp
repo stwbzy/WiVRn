@@ -1,0 +1,116 @@
+#version 450
+
+// Experimental server-side motion-vector prototype.
+//
+// Estimate a low-resolution per-pixel displacement from the current composed
+// frame to the previous frame. This is a color-only fallback for applications
+// that do not submit XR_EXT_frame_synthesis metadata; it is not a replacement
+// for application-provided motion vectors.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) uniform sampler2D currentFrame;
+layout(binding = 1) uniform sampler2D previousFrame;
+layout(binding = 2, rgba16f) uniform writeonly image2D motionVectors;
+
+layout(push_constant) uniform Constants {
+    vec2 invCurrentSize;
+    vec2 currentPerMotion;
+    int searchRadius;
+    int sampleStride;
+    vec2 transformAlignmentPadding;
+    mat4 historyTransform;
+    vec4 currentToTangent;
+} constants;
+
+float luma(sampler2D image, ivec2 pixel, ivec2 size)
+{
+    ivec2 clamped = clamp(pixel, ivec2(0), size - ivec2(1));
+    return dot(texelFetch(image, clamped, 0).rgb, vec3(0.299, 0.587, 0.114));
+}
+
+bool insideUv(vec2 uv)
+{
+    return all(greaterThanEqual(uv, vec2(0.0))) && all(lessThan(uv, vec2(1.0)));
+}
+
+vec2 reprojectToHistory(vec2 currentUv, out bool valid)
+{
+    vec4 values = vec4(currentUv, -1.0, 1.0);
+    values.xy = fma(values.xy, constants.currentToTangent.zw, constants.currentToTangent.xy);
+    values.y = -values.y;
+    values = constants.historyTransform * values;
+    valid = values.w > 0.00001;
+    if (!valid) {
+        return vec2(-1.0);
+    }
+    return values.xy / values.w * 0.5 + 0.5;
+}
+
+float blockError(ivec2 currentPixel, ivec2 offset, ivec2 size, int stride)
+{
+    float error = 0.0;
+    int radius = max(stride, 1);
+    for (int y = -radius; y <= radius; y += radius) {
+        for (int x = -radius; x <= radius; x += radius) {
+            ivec2 samplePixel = clamp(currentPixel + ivec2(x, y), ivec2(0), size - ivec2(1));
+            vec2 currentUv = (vec2(samplePixel) + vec2(0.5)) * constants.invCurrentSize;
+            bool validReprojection;
+            vec2 previousUv = reprojectToHistory(currentUv, validReprojection);
+            ivec2 previousPixel = ivec2(floor(previousUv * vec2(size))) + offset;
+            bool validPrevious = validReprojection && insideUv(previousUv) &&
+                                 all(greaterThanEqual(previousPixel, ivec2(0))) &&
+                                 all(lessThan(previousPixel, size));
+            if (!validPrevious) {
+                error += 1.0;
+                continue;
+            }
+            float currentLuma = luma(currentFrame, samplePixel, size);
+            float previousLuma = luma(previousFrame, previousPixel, size);
+            error += abs(currentLuma - previousLuma);
+        }
+    }
+    return error;
+}
+
+void main()
+{
+    ivec2 motionPixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 motionSize = imageSize(motionVectors);
+    if (any(greaterThanEqual(motionPixel, motionSize))) {
+        return;
+    }
+
+    ivec2 size = textureSize(currentFrame, 0);
+    ivec2 pixel = ivec2((vec2(motionPixel) + vec2(0.5)) * constants.currentPerMotion);
+    pixel = clamp(pixel, ivec2(0), size - ivec2(1));
+    int radius = clamp(constants.searchRadius, 0, 8);
+    int stride = max(constants.sampleStride, 1);
+    ivec2 bestOffset = ivec2(0);
+    float bestError = blockError(pixel, bestOffset, size, stride);
+
+    for (int y = -radius; y <= radius; ++y) {
+        for (int x = -radius; x <= radius; ++x) {
+            ivec2 candidate = ivec2(x, y) * stride;
+            float error = blockError(pixel, candidate, size, stride);
+            if (error < bestError) {
+                bestError = error;
+                bestOffset = candidate;
+            }
+        }
+    }
+
+    // The pose transform accounts for rotational head motion. Store only the
+    // residual displacement, plus a conservative confidence value. A match on
+    // the edge of the search window is likely clipped and must not be trusted
+    // enough to drag high-contrast objects across the generated frame.
+    float averageError = bestError / 9.0;
+    float confidence = 1.0 - smoothstep(0.035, 0.18, averageError);
+    bool searchClipped = abs(bestOffset.x) == radius * stride || abs(bestOffset.y) == radius * stride;
+    if (searchClipped) {
+        confidence *= 0.25;
+    }
+    imageStore(motionVectors,
+               motionPixel,
+               vec4(vec2(bestOffset) * constants.invCurrentSize, confidence, 1.0));
+}

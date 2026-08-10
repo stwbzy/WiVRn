@@ -67,6 +67,8 @@ public:
 
 private:
 	uint8_t stream_index;
+	double stream_frame_rate;
+	uint32_t decoded_audit_frames = 0;
 
 	vk::raii::Device & device;
 
@@ -111,6 +113,9 @@ private:
 	static void on_media_format_changed(AMediaCodec *, void * userdata, AMediaFormat *);
 	static void on_media_input_available(AMediaCodec *, void * userdata, int32_t index);
 	static void on_media_output_available(AMediaCodec *, void * userdata, int32_t index, AMediaCodecBufferInfo * bufferInfo);
+
+	uint64_t frame_timestamp_us(uint64_t frame_index) const;
+	uint64_t frame_index_for_timestamp(int64_t timestamp_ns) const;
 
 	std::unordered_map<AHardwareBuffer *, std::shared_ptr<mapped_hardware_buffer>> hardware_buffer_map;
 	vk::raii::RenderPass renderpass = nullptr;

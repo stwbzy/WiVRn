@@ -350,7 +350,8 @@ layer_squasher::layer_squasher(vk_bundle & vk, vk::Extent3D target_size) :
                                       .extent = target_size,
                                       .mipLevels = 1,
                                       .arrayLayers = view_count,
-                                      .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled,
+                                      .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled |
+                                               vk::ImageUsageFlagBits::eTransferSrc,
                               },
                               vk::ImageFormatListCreateInfo{
                                       .viewFormatCount = formats.size(),
@@ -644,6 +645,11 @@ layer_squasher::do_layers(
 std::array<vk::ImageView, 2> layer_squasher::get_views()
 {
 	return {*render_view_srgb[0], *render_view_srgb[1]};
+}
+
+std::array<vk::ImageView, 2> layer_squasher::get_unorm_views()
+{
+	return {*render_view_unorm[0], *render_view_unorm[1]};
 }
 
 uint32_t layer_squasher::max_layers(const vk::PhysicalDeviceProperties & prop) const

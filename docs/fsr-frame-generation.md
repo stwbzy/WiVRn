@@ -1,231 +1,330 @@
-# Experimental FSR Frame Generation fork
+# FSR 1 spatial upscaling with experimental frame generation
 
-Status date: 2026-08-09.
+Status date: 2026-08-10.
 
-This branch explores runtime-owned OpenXR Space Warp and AMD FSR3 Frame
-Generation in WiVRn. It does not modify VRChat, OpenComposite, or game
-binaries. The PC runtime/compositor is the integration point; headset changes
-are permitted only when the streaming or recovery protocol requires them.
+This branch contains two independent Vulkan compositor features that can be
+enabled together: AMD FidelityFX FSR 1 spatial reconstruction (EASU followed
+by RCAS), and the frame-generation path tested in the earlier WiVRn `v26.6.2`
+experiment. Both run inside the current pause/resume lifecycle.
 
-## Current result
+The spatial shader is based on AMD's MIT-licensed
+[FidelityFX-FSR source](https://github.com/GPUOpen-Effects/FidelityFX-FSR),
+including its documented EASU 1x–4x output-area range and the required
+EASU-then-RCAS pass order.
 
-The structural metadata path is implemented and physically exercised. Visual
-Frame Generation is not implemented.
+> [!IMPORTANT]
+> This is **not AMD FidelityFX FSR 3**. The spatial path is a 32-bit GLSL port
+> of AMD's open-source FSR 1 EASU/RCAS algorithm. Frame generation is a
+> separate WiVRn implementation using stereo color history, rotational pose
+> reprojection, and confidence-gated residual optical flow; it does not infer
+> real scene depth or modify VRChat/game binaries.
 
-The build-tree runtime can advertise and validate:
+## Current status
 
-- `XR_KHR_vulkan_enable2`;
-- `XR_EXT_frame_synthesis`;
-- `XR_FB_space_warp`.
+Implemented in the current tree:
 
-It transports stereo color, depth, and motion-vector swapchains through XRT
-and IPC. The compositor probe observes the metadata but deliberately retains
-normal composition:
+- negotiation of both reduced render size and the headset runtime's original
+  recommended per-eye size;
+- FSR 1 EASU reconstruction from the reduced render to that recommended size;
+- a separate RCAS pass after EASU, with configurable sharpness;
+- preservation of WiVRn's foveation ratio at the reconstructed resolution;
+- identical EASU/RCAS processing for real and generated frames;
+- persistent two-eye color history at the final render extent;
+- a metadata-backed candidate path for applications that submit motion and
+  depth through `XR_EXT_frame_synthesis`;
+- an explicitly enabled color-only fallback for applications such as VRChat;
+- midpoint pose compensation plus a quarter-resolution residual motion field;
+- candidate handoff through the existing foveation and encoder pipeline;
+- 45-to-90 double-rate transport with even generated IDs and odd application
+  IDs;
+- Android MediaCodec timestamp correlation using the advertised stream rate;
+- reset of history, flow, poses and pacing on pause/reconnect;
+- normal-composition fallback when a candidate cannot be produced.
 
-```text
-FSR frame-generation compositor probe enabled: metadata-only, normal composition retained
-FSR frame-generation compositor probe: ... backend=none fallback=normal-composition
-```
+The current port builds locally as both a PC server and Android debug APK. The
+EASU and RCAS SPIR-V modules pass `spirv-val` for Vulkan 1.3, the APK verifies
+with Android signature scheme v2, and the `connection-lifecycle` and
+`fsr-config` tests pass (2/2). The earlier `v26.6.2` frame generator was
+visually exercised with VRChat and Quest at 90 Hz; the new combined FSR 1 path
+still needs a fresh physical visual/stability run before it is considered
+revalidated.
 
-Therefore:
+## Environment variables
 
-- extension advertisement is not evidence of FSR3 output;
-- `inputs_ready=1` proves structural input delivery, not generated pixels;
-- current tests do not demonstrate visual 45→90 interpolation;
-- normal composition remains the required fallback.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `WIVRN_FSR_UPSCALING` | `0` | Enable FSR 1 EASU + RCAS when the headset render resolution is below 100%. |
+| `WIVRN_FSR_SHARPNESS` | `0.2` | RCAS sharpness in stops: `0` is strongest; accepted range is `0`–`2`. |
+| `WIVRN_FSR_FRAME_GENERATION` | `0` | Master switch: allocate history and candidate resources. |
+| `WIVRN_FSR_FRAME_GENERATION_COLOR_ONLY` | `0` | Permit color-history generation when the application supplies no motion/depth metadata. |
+| `WIVRN_FSR_FRAME_GENERATION_HANDOFF` | `0` | Send a complete candidate through foveation and the encoder. Double-rate mode enables this implicitly. |
+| `WIVRN_FSR_FRAME_GENERATION_DOUBLE_RATE` | `0` | Pace the application at half rate and send candidate/application pairs at the headset rate. |
+| `WIVRN_FSR_FRAME_GENERATION_SEARCH_RADIUS` | `2` | Residual optical-flow radius, clamped from 1 through 4. |
 
-## Revisions and patch stack
+Leave the search radius unset for initial testing. A larger value costs more
+GPU work and cannot correct missing depth, disocclusion, or pose errors.
 
-The WiVRn base revision is:
-
-```text
-aa3a94e76d3126eedcda0719d36722b3c350b90b
-```
-
-The generated Monado history is:
-
-```text
-285a5a539 multi: transport frame-synthesis swapchains
-486881b5e oxr: validate and transport frame synthesis metadata
-7a357e2ae xrt: transport frame-synthesis metadata through IPC
-b6799ec08 ipc: join client threads before teardown
-```
-
-The corresponding source patches are:
-
-```text
-patches/monado/0010-frame-synthesis-metadata-transport.patch
-patches/monado/0011-oxr-validate-frame-synthesis.patch
-patches/monado/0012-multi-frame-synthesis-transport.patch
-```
-
-Patch `0012` forwards the new swapchain metadata through the GL, Vulkan, and
-multi-client compositor wrappers. The complete series applies cleanly from
-the recorded base, and the generated Monado worktree is expected to remain
-clean.
+FSR 1 needs a lower-resolution input. In the headset settings, disconnect and
+set **Render resolution** to 70–85% before connecting. At 100%, the server logs
+that spatial upscaling is inactive rather than wasting GPU time on a 1:1 EASU
+pass. The implementation rejects scales below FSR 1's documented 4x output
+area limit; 50% per axis is the lower boundary.
 
 ## Build
 
-Configure a development server and tests without replacing the installed
-runtime:
+From this checkout:
 
 ```bash
+cd /home/stwby/Proyectos/WiVRn-fsr
+
 cmake --preset server-no-system-boost \
   -DWIVRN_BUILD_TEST=ON \
   -DEigen3_DIR=/home/stwby/Proyectos/deps/eigen-install/share/eigen3/cmake \
   -DCMAKE_PREFIX_PATH=/home/stwby/Proyectos/deps/local
 
 cmake --build build-server-no-system-boost -j2
+ctest --test-dir build-server-no-system-boost --output-on-failure
+
+ANDROID_HOME=/home/stwby/Android ./gradlew assembleDebug
 ```
 
-Important outputs:
+Matching local artifacts:
 
 ```text
 build-server-no-system-boost/server/wivrn-server
 build-server-no-system-boost/server/wivrnctl
 build-server-no-system-boost/openxr_wivrn-dev.json
-build-server-no-system-boost/_deps/monado-build/src/xrt/targets/openxr/libopenxr_wivrn.so
 build-server-no-system-boost/tools/wivrn-fsr-openxr-harness
+build/outputs/apk/debug/WiVRn-fsr-debug.apk
 ```
 
-Start the matching build-tree server with the diagnostic probe:
+The PC server/runtime and headset APK must come from this same source tree.
+The client changes are required both for double-rate MediaCodec timestamps and
+for sending the unscaled headset-recommended resolution to the server.
+
+Install that matching APK without clearing the pairing/resume token:
+
+```bash
+adb install -r build/outputs/apk/debug/WiVRn-fsr-debug.apk
+```
+
+## Run FSR 1 only
+
+This is the simplest visual comparison and should be tested before adding
+frame generation. Set headset **Render resolution** to 70–85%, reconnect, and
+run:
+
+```bash
+XRT_PRINT_OPTIONS=1 XRT_LOG=info \
+WIVRN_FSR_UPSCALING=1 \
+WIVRN_FSR_SHARPNESS=0.2 \
+build-server-no-system-boost/server/wivrn-server \
+  --no-fork --early-active-runtime
+```
+
+This runs EASU and RCAS for each real application frame while leaving the
+application and stream cadence unchanged. Compare fine text and diagonal
+edges against a control run with both variables unset. `0` is the strongest
+RCAS setting; increase the stops toward `2` if edges shimmer or look
+oversharpened.
+
+## Run FSR 1 and 45-to-90 frame generation together
+
+First set the headset **Render resolution** below 100% as described above and
+disable headset **Application SpaceWarp**. The server double-rate mode already
+halves application pacing; leaving the headset option active applies a second
+divider. Then stop any installed/user-service server so only one process owns
+port 9757 and run:
+
+```bash
+XRT_PRINT_OPTIONS=1 XRT_LOG=info \
+WIVRN_FSR_UPSCALING=1 \
+WIVRN_FSR_SHARPNESS=0.2 \
+WIVRN_FSR_FRAME_GENERATION=1 \
+WIVRN_FSR_FRAME_GENERATION_COLOR_ONLY=1 \
+WIVRN_FSR_FRAME_GENERATION_HANDOFF=1 \
+WIVRN_FSR_FRAME_GENERATION_DOUBLE_RATE=1 \
+build-server-no-system-boost/server/wivrn-server \
+  --no-fork --early-active-runtime
+```
+
+The processing order is deterministic:
+
+```text
+OpenXR layers at reduced render size
+  -> SpaceWarp candidate at reduced render size
+  -> FSR 1 EASU
+  -> FSR 1 RCAS
+  -> WiVRn foveation / YCbCr
+  -> encoder
+```
+
+In double-rate mode, the generated frame goes through the complete EASU/RCAS
+chain first, then the real frame goes through the same chain. Separate Vulkan
+descriptor banks prevent the second dispatch from changing the first one's
+source.
+
+Expected additional marker:
+
+```text
+FSR 1 spatial upscaling enabled: EASU 1465x1535 -> 1832x1919 per eye, RCAS sharpness=0.20 stops
+```
+
+Exact sizes depend on the headset and selected resolution. If the log says
+`requested but inactive`, lower **Render resolution**, reconnect, and verify
+that the matching APK is installed.
+
+Expected cadence is application 45 Hz / stream 90 Hz at a 90 Hz headset rate,
+or application 60 Hz / stream 120 Hz at 120 Hz. Application 30 Hz / stream
+60 Hz while the headset is at 120 Hz means headset **Application SpaceWarp**
+is still enabled.
+
+## Run the 45-to-90 color-only path
+
+Stop any installed/user-service server first so only one process owns port
+9757. Then run the old four-variable command from the project root:
+
+```bash
+XRT_PRINT_OPTIONS=1 XRT_LOG=info \
+WIVRN_FSR_FRAME_GENERATION=1 \
+WIVRN_FSR_FRAME_GENERATION_COLOR_ONLY=1 \
+WIVRN_FSR_FRAME_GENERATION_HANDOFF=1 \
+WIVRN_FSR_FRAME_GENERATION_DOUBLE_RATE=1 \
+build-server-no-system-boost/server/wivrn-server \
+  --no-fork --early-active-runtime
+```
+
+At a 90 Hz headset rate, the application is paced at 45 Hz and WiVRn sends an
+interval candidate followed by the real application frame at 90 Hz. It must
+not advertise a 180 Hz video stream.
+
+Expected server markers:
+
+```text
+FSR frame-generation option: env=1 parsed=1
+FSR color-only optical-flow search radius: 2
+FSR frame-generation double-rate transport enabled: application rate 45Hz, stream rate 90Hz
+Video stream description: ... frame_rate=90.0Hz refresh_rate=90.0Hz
+FSR frame-generation candidate dispatched: mode=pose-compensated-color-only ...
+FSR frame-generation candidate handed off to foveation and encoder; diagnostic double-rate mode
+FSR double-rate pair submitted: candidate_frame=0 application_frame=1 ...
+```
+
+Expected headset marker:
+
+```text
+MediaCodec stream 0 cadence: frame_rate=90Hz refresh_rate=90Hz
+```
+
+The exact image size depends on headset and stream configuration. A
+`180Hz/90Hz` rate pair means an older or mismatched server is running.
+
+## Other useful modes
+
+Recommended isolation matrix:
+
+| Test | Spatial FSR | Frame generation | Purpose |
+| --- | --- | --- | --- |
+| Control | Off | Off | Verify the unchanged WiVRn path. |
+| FSR only | On | Off | Inspect reconstruction, text and RCAS sharpness. |
+| Generation only | Off | On | Inspect cadence and SpaceWarp artifacts independently. |
+| Combined | On | On | Confirm identical EASU/RCAS treatment of real and generated frames. |
+
+Allocate and inspect inputs while keeping normal composition:
 
 ```bash
 WIVRN_FSR_FRAME_GENERATION=1 \
   build-server-no-system-boost/server/wivrn-server
 ```
 
-The environment variable enables observation only. It does not initialize an
-FSR3 backend or alter the submitted frame.
+Same-rate diagnostic candidate handoff:
+
+```bash
+WIVRN_FSR_FRAME_GENERATION=1 \
+WIVRN_FSR_FRAME_GENERATION_COLOR_ONLY=1 \
+WIVRN_FSR_FRAME_GENERATION_HANDOFF=1 \
+  build-server-no-system-boost/server/wivrn-server
+```
+
+Double-rate generation from application-provided motion/depth metadata does
+not need the color-only switch:
+
+```bash
+WIVRN_FSR_FRAME_GENERATION=1 \
+WIVRN_FSR_FRAME_GENERATION_DOUBLE_RATE=1 \
+  build-server-no-system-boost/server/wivrn-server
+```
+
+For VRChat through OpenComposite, use the complete four-variable command:
+that path normally exposes projection color but not application motion vectors
+or depth.
 
 ## Diagnostic harness
 
-`wivrn-fsr-openxr-harness` is a standalone Vulkan/OpenXR client with three
-modes:
-
-- `--normal`: stereo projection without synthesis metadata;
-- `--frame-synthesis`: `XR_EXT_frame_synthesis` metadata;
-- `--space-warp`: `XR_FB_space_warp` compatibility metadata.
-
-For the metadata modes it creates two color, two motion-vector, and two depth
-swapchains, locates both views, and submits one projection layer per frame.
-It deliberately does not write meaningful image pixels or synthesize a frame.
-
-Example short run against matching build-tree artifacts:
+The standalone harness can submit normal projection, EXT frame-synthesis
+metadata, or FB Space Warp metadata. With the matching build-tree server and a
+connected headset, run from a second terminal:
 
 ```bash
-IPC_IGNORE_VERSION=1 \
-  build-server-no-system-boost/tools/wivrn-fsr-openxr-harness \
-  --frame-synthesis --frames 300 --timeout-ms 30000
+XR_RUNTIME_JSON="$PWD/build-server-no-system-boost/openxr_wivrn-dev.json" \
+DISABLE_XR_APILAYER_NOV3_xess_upscaler=1 \
+XR_LOADER_DISABLE_IMPLICIT_LAYERS=1 \
+build-server-no-system-boost/tools/wivrn-fsr-openxr-harness \
+  --normal --visual-pattern --frames 120 --timeout-ms 20000
 ```
 
-Use `IPC_IGNORE_VERSION=1` only when the harness, runtime, and server were
-built from this same tree. It is not permission to mix the build-tree runtime
-with an installed WiVRn service. An incompatible shared-memory layout was
-previously rejected by the normal version check and produced `SIGBUS` when
-that check was bypassed.
+Use `--normal` to exercise the same color-only condition as VRChat. Use
+`--frame-synthesis` or `--space-warp` to validate the metadata transport path.
+The harness is a diagnostic application, not a substitute for a real-game
+visual test.
 
-Expected structural probe fields include:
+Do not use `IPC_IGNORE_VERSION=1` to mix an installed runtime with unrelated
+build-tree artifacts. Protocol and shared-memory layouts must match.
 
-```text
-synthesis_layers=1
-synthesis_depth_views=2
-motion_vector_views=2
-inputs_ready=1
-backend=none
-fallback=normal-composition
-```
+## Reconnection behavior
 
-## Validation completed
+On pause or link loss, the compositor clears:
 
-The following evidence was collected with the matching build-tree server and
-a Quest 3S:
+- pending encode requests;
+- color history and generated output validity;
+- optical-flow validity;
+- previous poses and display time;
+- pacer feedback samples.
 
-- server, runtime, and harness compile successfully;
-- a 300-frame physical frame-synthesis smoke test exited successfully;
-- a 20,000-frame structural run exited successfully across a voluntary
-  disconnect/resume;
-- a physical Wi-Fi cut retained the same PC OpenXR application and restored
-  synthesis metadata after reconnection;
-- the Meta `xrWaitFrame` recovery fallback recreated the local XR activity and
-  resumed at connection generation 3;
-- the frame-generation probe continued to report normal-composition fallback,
-  with no claim of generated pixels.
+On resume, the encoder is reset so the stream starts with fresh parameter sets
+and an IDR. Frame IDs remain correlated with the OpenXR pacer, preventing
+post-reconnect feedback from being assigned to a pre-reconnect frame.
+EASU/RCAS has no temporal history to reuse across generations; its persistent
+images retain only Vulkan layout state and are overwritten before each use.
 
-The lifecycle result is documented separately in
-[connection-lifecycle.md](connection-lifecycle.md).
+## Safety and limitations
 
-## Architecture
+- Unset `WIVRN_FSR_FRAME_GENERATION` to use the unchanged normal path.
+- Unset `WIVRN_FSR_UPSCALING` to bypass EASU/RCAS completely.
+- An incomplete candidate is never handed to the encoder.
+- If no valid candidate exists, the generated slot uses a complete normal
+  composition frame and keeps the transport cadence contiguous.
+- The color-only path corrects rotational pose and estimates residual 2D
+  motion. Positional movement, disocclusion, animated objects and transparency
+  can still show artifacts because there is no real scene depth.
+- OpenXR metadata transport does not prove that a game supplies useful motion
+  vectors or depth.
+- FSR 1 is spatial and does not reconstruct temporal detail. It also does not
+  turn the custom color-only generator into AMD FSR 3 Frame Generation.
 
-The work is intentionally split into distinct layers:
+## Physical revalidation checklist
 
-1. OpenXR extensions describe application-provided depth and motion-vector
-   metadata and its relationship to stereo color frames.
-2. XRT/IPC transports validated swapchains and per-frame metadata to the
-   server compositor.
-3. The compositor must own persistent Vulkan resources, image transitions,
-   synchronization, and queue ownership.
-4. A real FSR3 backend must process two valid source frames and their motion
-   information.
-5. Frame pacing must insert generated output without corrupting OpenXR timing,
-   encoder cadence, or reconnection generations.
-
-The current implementation completes layers 1 and 2 and provides a diagnostic
-boundary for layer 3. It does not complete layers 3–5.
-
-VRChat currently does not provide the required Space Warp depth and motion
-vectors through this path. Correct production inputs cannot be inferred from a
-color frame alone. This remains an application/runtime capability issue, not a
-reason to add a game-specific hook.
-
-Relevant specifications:
-
-- [XR_FB_space_warp](https://registry.khronos.org/OpenXR/specs/1.0/man/html/XrCompositionLayerSpaceWarpInfoFB.html)
-- [XR_EXT_frame_synthesis](https://registry.khronos.org/OpenXR/specs/1.1/man/html/XrFrameSynthesisInfoEXT.html)
-- [AMD FSR3 integration guide](https://gpuopen.com/manuals/fidelityfx_sdk/techniques/super-resolution-interpolation/)
-- [AMD FSR3 overview](https://gpuopen.com/fidelityfx-super-resolution-3/)
-
-## Next implementation milestones
-
-1. Consume the validated images at the compositor boundary.
-2. Add persistent Vulkan resources and explicit synchronization.
-3. Initialize and execute the FSR3 backend.
-4. Integrate generated-frame timestamps and 45→90 pacing.
-5. Reset every temporal resource on pause, reconnect, codec change, or stream
-   generation change.
-6. Measure generated frames, fallbacks, pacing misses, and GPU cost.
-7. Validate visual output and cadence before enabling the path for games.
-
-## Acceptance markers
-
-Space Warp cannot be called active until logs contain equivalent evidence to:
-
-```text
-XR_FB_space_warp advertised=1 enabled=1
-Space Warp metadata valid: views=2
-```
-
-FSR3 Frame Generation additionally requires:
-
-```text
-FSR3 backend initialized: Vulkan
-FSR3 inputs valid: views=2
-FSR3 generated frame submitted
-```
-
-Visual acceptance also requires stable cadence, no old-generation frame or
-pose reuse, and no regression when frame generation is disabled.
-
-## Safety rules
-
-- Do not modify or inject into VRChat or another game.
-- Do not advertise active synthesis from extension enumeration alone.
-- Do not synthesize production depth or motion vectors from color alone.
-- Do not submit an incomplete generated image.
-- Preserve normal composition when metadata, timing, synchronization, or
-  Vulkan validation fails.
-- Reset FSR temporal state and request a fresh IDR after reconnection.
-- Never mix packets, frames, poses, or history from different connection
-  generations.
-- Keep installed and build-tree runtimes isolated unless their IPC layouts are
-  known to match.
+1. Install the matching debug APK with `adb install -r`.
+2. Disable headset **Application SpaceWarp** and confirm the server and Quest
+   both report `90/90 Hz` at 90 Hz, or `120/120 Hz` at 120 Hz.
+3. Confirm the server reports an EASU input smaller than its output and the
+   video stream uses the reconstructed/foveated dimensions.
+4. Confirm decoded frame IDs are contiguous and candidates dispatch after the
+   first color-history capture.
+5. Check fast head rotation, translation, hands/avatars, fine text and transparent
+   surfaces for artifacts.
+6. Test a disconnect/reconnect and confirm history starts fresh with a new
+   IDR.
+7. Run a normal-path control session with every `WIVRN_FSR_*` variable unset.
+8. Complete a long-duration session before making a stability claim for this
+   port.

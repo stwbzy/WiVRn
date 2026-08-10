@@ -179,6 +179,7 @@ Still required before a release claim:
   source-address changes;
 - leak checks for native threads, locks, and persistent MediaCodec failures.
 
-The frame-synthesis harness validates metadata transport and lifecycle
-stability only. It does not prove visual 45→90 frame generation; see
+The earlier frame-synthesis harness run validated metadata transport and
+lifecycle stability only. The newly ported 45-to-90 backend separately needs a
+fresh physical reconnection and long-duration run; see
 [fsr-frame-generation.md](fsr-frame-generation.md).

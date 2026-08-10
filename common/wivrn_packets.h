@@ -306,6 +306,12 @@ struct settings_changed
 
 struct headset_info_packet
 {
+	// Recommended per-eye size reported by the headset runtime before the
+	// user's render-resolution scale is applied. Spatial upscalers use this as
+	// their reconstruction target while OpenXR applications keep rendering at
+	// render_eye_width/render_eye_height.
+	uint16_t native_eye_width;
+	uint16_t native_eye_height;
 	uint16_t render_eye_width;
 	uint16_t render_eye_height;
 	uint16_t stream_eye_width;

@@ -9,6 +9,7 @@ This guide covers debugging techniques for WiVRn, including log collection, cras
   - [HMD Client Logs](#hmd-client-logs)
   - [Server Logs](#server-logs)
 - [Connection Lifecycle](#connection-lifecycle)
+- [Experimental FSR 1 and Frame Generation](#experimental-fsr-1-and-frame-generation)
 - [Virtual Body Trackers](#virtual-body-trackers)
 - [Starting Components for Debugging](#starting-components-for-debugging)
   - [HMD Client](#hmd-client)
@@ -214,6 +215,43 @@ Its interactive commands include `drop tcp on`, `drop udp on`, `drop both on`, `
 `close tcp`, `status`, and the corresponding `off` commands. `--close-tcp-after BYTES` closes a
 connection during its handshake. Restarting it with `--upstream-bind ADDRESS` permits testing a
 new source address while keeping the resume token and paired headset identity unchanged.
+
+---
+
+## Experimental FSR 1 and Frame Generation
+
+Run the local server with `XRT_LOG=info` so the backend markers are visible.
+For the color-only 45-to-90 path, the important sequence is:
+
+```text
+FSR 1 spatial upscaling enabled: EASU ... -> ... per eye, RCAS sharpness=... stops
+FSR frame-generation option: env=1 parsed=1
+FSR frame-generation persistent color history captured: views=2 ...
+color_only=1 inputs_ready=1
+FSR frame-generation candidate dispatched: mode=pose-compensated-color-only ...
+FSR double-rate pair submitted: candidate_frame=... application_frame=...
+```
+
+Interpret common failures as follows:
+
+| Marker | Meaning |
+| --- | --- |
+| `FSR 1 ... requested but inactive` | Render resolution is 100%, the APK is mismatched, or the requested scale exceeds the 4x output-area limit. |
+| `FSR 1 ... initialization failed` | EASU/RCAS Vulkan resources failed; the compositor keeps a complete linear/foveation fallback. |
+| Headset at 120 Hz but server reports application 30 Hz / stream 60 Hz | Headset **Application SpaceWarp** is still enabled, applying a second frame-rate divider. Disable it before using server double-rate generation. |
+| `history_valid=0` during startup | Expected until the first complete composed frame is captured. |
+| `inputs_ready=0` continuously | No valid metadata and the color-only switch is not active, or history never completed. |
+| `backend initialization failed` | Vulkan resource/pipeline creation failed; WiVRn keeps normal composition. |
+| `candidate failed` | A dispatch or synchronization error disabled handoff for safety. |
+| Server `90Hz`, client `100Hz` | The headset APK does not match this server build. |
+| Server `180Hz`, headset `90Hz` | An older double-rate server is running. |
+| IDs skip every other frame | Mismatched client/server or the application-frame stream was observed instead of decoded output. |
+
+After a reconnect, history must return briefly to invalid, the encoder must
+emit a fresh IDR, and candidate dispatch must resume only after a new color
+capture. A candidate appearing immediately from pre-disconnect history is a
+bug. See [fsr-frame-generation.md](fsr-frame-generation.md) for the exact run
+command and limitations.
 
 ---
 
@@ -463,6 +501,13 @@ The log is located at `$XDG_STATE_HOME/xrizer/xrizer.txt`, or `$HOME/.local/stat
 | `XRT_LOG` | Log level (`trace`, `debug`, `info`, `warn`, `error`) | `warn` |
 | `XRT_COMPOSITOR_LOG` | Compositor log level (`trace`, `debug`, `info`, `warn`, `error`) | `info` |
 | `OXR_VIEWPORT_SCALE_PERCENTAGE` | Per-application viewport scale (set on application, not server) | `100` |
+| `WIVRN_FSR_UPSCALING` | Reconstruct reduced render resolution to the headset-recommended size with FSR 1 EASU + RCAS | `0` |
+| `WIVRN_FSR_SHARPNESS` | RCAS sharpness in stops (`0` strongest, range `0`–`2`) | `0.2` |
+| `WIVRN_FSR_FRAME_GENERATION` | Master switch for experimental candidate resources | `0` |
+| `WIVRN_FSR_FRAME_GENERATION_COLOR_ONLY` | Allow pose-compensated color-history fallback | `0` |
+| `WIVRN_FSR_FRAME_GENERATION_HANDOFF` | Hand a valid candidate to foveation/encoder | `0` |
+| `WIVRN_FSR_FRAME_GENERATION_DOUBLE_RATE` | Half application pacing and send candidate/application pairs | `0` |
+| `WIVRN_FSR_FRAME_GENERATION_SEARCH_RADIUS` | Residual optical-flow search radius, clamped 1–4 | `2` |
 
 ### Debugging
 

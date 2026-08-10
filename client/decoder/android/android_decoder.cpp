@@ -23,6 +23,7 @@
 #include "utils/named_thread.h"
 #include <android/hardware_buffer.h>
 #include <cassert>
+#include <cmath>
 #include <magic_enum.hpp>
 #include <media/NdkImage.h>
 #include <media/NdkImageReader.h>
@@ -109,9 +110,17 @@ decoder::decoder(
         uint8_t stream_index,
         std::weak_ptr<scenes::stream> weak_scene,
         shard_accumulator * accumulator) :
-        stream_index(stream_index), device(device), weak_scene(weak_scene), accumulator(accumulator)
+        stream_index(stream_index),
+        stream_frame_rate(description.frame_rate > 0 ? description.frame_rate : 100.0),
+        device(device),
+        weak_scene(weak_scene),
+        accumulator(accumulator)
 {
 	spdlog::info("hbm_mutex.native_handle() = {}", (void *)hbm_mutex.native_handle());
+	spdlog::info("MediaCodec stream {} cadence: frame_rate={}Hz refresh_rate={}Hz",
+	             stream_index,
+	             description.frame_rate,
+	             description.refresh_rate);
 
 	auto width = description.width;
 	auto height = description.height / (stream_index == 2 ? 2 : 1);
@@ -140,7 +149,7 @@ decoder::decoder(
 		// latency mode
 		AMediaFormat_setInt32(format.get(), AMEDIAFORMAT_KEY_WIDTH, width);
 		AMediaFormat_setInt32(format.get(), AMEDIAFORMAT_KEY_HEIGHT, height);
-		AMediaFormat_setInt32(format.get(), AMEDIAFORMAT_KEY_OPERATING_RATE, std::ceil(description.frame_rate));
+		AMediaFormat_setInt32(format.get(), AMEDIAFORMAT_KEY_OPERATING_RATE, std::ceil(stream_frame_rate));
 		AMediaFormat_setInt32(format.get(), AMEDIAFORMAT_KEY_PRIORITY, 0);
 
 		media_codec.reset(AMediaCodec_createDecoderByType(mime(description.codec[stream_index])));
@@ -237,8 +246,8 @@ void decoder::push_data(std::span<std::span<const uint8_t>> data, uint64_t frame
 	if (partial)
 		return;
 
+	const auto timestamp = frame_timestamp_us(frame_index);
 	jobs.push([=, idx = current_input_buffer.idx, data_size = current_input_buffer.data_size, mc = media_codec.get()]() {
-		uint64_t timestamp = frame_index * 10'000;
 		auto status = AMediaCodec_queueInputBuffer(mc, idx, 0, data_size, timestamp, 0);
 		if (status != AMEDIA_OK)
 			spdlog::error("AMediaCodec_queueInputBuffer: MediaCodec error {}({})",
@@ -247,6 +256,19 @@ void decoder::push_data(std::span<std::span<const uint8_t>> data, uint64_t frame
 		return false;
 	});
 	current_input_buffer = input_buffer{};
+}
+
+uint64_t decoder::frame_timestamp_us(uint64_t frame_index) const
+{
+	return static_cast<uint64_t>(std::llround(static_cast<long double>(frame_index) * 1'000'000.0L / stream_frame_rate));
+}
+
+uint64_t decoder::frame_index_for_timestamp(int64_t timestamp_ns) const
+{
+	if (timestamp_ns < 0)
+		return 0;
+	return static_cast<uint64_t>(
+	        std::llround(static_cast<long double>(timestamp_ns) * stream_frame_rate / 1'000'000'000.0L));
 }
 
 void decoder::frame_completed(const wivrn::from_headset::feedback & feedback, const wivrn::to_headset::video_stream_data_shard::view_info_t & view_info)
@@ -291,7 +313,15 @@ void decoder::on_image_available(AImageReader * reader)
 
 		int64_t fake_timestamp_ns;
 		check(AImage_getTimestamp(image.get(), &fake_timestamp_ns), "AImage_getTimestamp");
-		uint64_t frame_index = (fake_timestamp_ns + 5'000'000) / (10'000'000);
+		uint64_t frame_index = frame_index_for_timestamp(fake_timestamp_ns);
+		if (decoded_audit_frames < 4)
+		{
+			++decoded_audit_frames;
+			spdlog::info("MediaCodec stream {} decoded frame={} timestamp={}ns",
+			             stream_index,
+			             frame_index,
+			             fake_timestamp_ns);
+		}
 
 		frame_infos.drop_until([frame_index](auto & x) { return x.feedback.frame_index >= frame_index; });
 

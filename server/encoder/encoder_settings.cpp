@@ -18,6 +18,7 @@
  */
 #include "encoder_settings.h"
 
+#include "compositor/fsr_config.h"
 #include "driver/configuration.h"
 #include "driver/wivrn_session.h"
 #include "util/u_logging.h"
@@ -266,9 +267,12 @@ public:
 };
 } // namespace
 
-static uint16_t align(uint16_t value, uint16_t alignment)
+static uint16_t align(uint32_t value, uint32_t alignment)
 {
-	return ((value + alignment - 1) / alignment) * alignment;
+	const uint32_t aligned = ((value + alignment - 1) / alignment) * alignment;
+	if (aligned > UINT16_MAX)
+		throw std::runtime_error("requested video size exceeds the protocol limit");
+	return aligned;
 }
 
 std::array<encoder_settings, 3> get_encoder_settings(wivrn::vk_bundle & bundle, wivrn_session & session)
@@ -290,8 +294,9 @@ std::array<encoder_settings, 3> get_encoder_settings(wivrn::vk_bundle & bundle, 
 		std::tie(dst.encoder_name, dst.codec) = prober.select_encoder(src);
 	}
 
-	auto width = align(info.stream_eye_width, 64);
-	auto height = align(info.stream_eye_height, 64);
+	const auto stream_extent = fsr_stream_dimensions(info);
+	auto width = align(stream_extent[0], 64);
+	auto height = align(stream_extent[1], 64);
 	// Ensure we don't try to encode too large images (only for left/right, ignore alpha)
 	for (size_t i = 0; i < 2; ++i)
 		check_video_size(res[i].encoder_name, res[i].codec, width, height);

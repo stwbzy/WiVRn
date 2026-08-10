@@ -1,0 +1,84 @@
+#version 450
+
+// 32-bit GLSL port of AMD FidelityFX FSR 1 RCAS.
+// Algorithm source: GPUOpen-Effects/FidelityFX-FSR, ffx_fsr1.h (v1.20210629).
+// Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to
+// deal in the Software without restriction, including without limitation the
+// rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+// sell copies of the Software, subject to inclusion of this notice.
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0) uniform sampler2D source_color;
+layout(binding = 1, rgba16f) uniform writeonly image2D destination_color;
+
+layout(push_constant) uniform constants
+{
+	ivec2 output_offset;
+	uvec2 output_size;
+	float sharpness;
+	vec3 padding;
+} pc;
+
+ivec2 clamp_coordinate(ivec2 coordinate)
+{
+	return clamp(coordinate,
+	             pc.output_offset,
+	             pc.output_offset + ivec2(pc.output_size) - ivec2(1));
+}
+
+vec4 load_color(ivec2 coordinate)
+{
+	return texelFetch(source_color, clamp_coordinate(coordinate), 0);
+}
+
+float safe_reciprocal(float value)
+{
+	if (abs(value) < 1e-6)
+		return value < 0.0 ? -1e6 : 1e6;
+	return 1.0 / value;
+}
+
+vec3 srgb_to_linear(vec3 color)
+{
+	vec3 low = color / 12.92;
+	vec3 high = pow((max(color, vec3(0.0)) + 0.055) / 1.055, vec3(2.4));
+	return mix(high, low, lessThanEqual(color, vec3(0.04045)));
+}
+
+void main()
+{
+	uvec2 local_pixel = gl_GlobalInvocationID.xy;
+	if (any(greaterThanEqual(local_pixel, pc.output_size)))
+		return;
+
+	ivec2 pixel = pc.output_offset + ivec2(local_pixel);
+	vec3 north = load_color(pixel + ivec2(0, -1)).rgb;
+	vec3 west = load_color(pixel + ivec2(-1, 0)).rgb;
+	vec4 center_sample = load_color(pixel);
+	vec3 center = center_sample.rgb;
+	vec3 east = load_color(pixel + ivec2(1, 0)).rgb;
+	vec3 south = load_color(pixel + ivec2(0, 1)).rgb;
+
+	vec3 minimum_ring = min(min(north, west), min(east, south));
+	vec3 maximum_ring = max(max(north, west), max(east, south));
+	vec3 hit_min = min(minimum_ring, center) * vec3(
+	        safe_reciprocal(4.0 * maximum_ring.r),
+	        safe_reciprocal(4.0 * maximum_ring.g),
+	        safe_reciprocal(4.0 * maximum_ring.b));
+	vec3 hit_max = (vec3(1.0) - max(maximum_ring, center)) * vec3(
+	        safe_reciprocal(4.0 * minimum_ring.r - 4.0),
+	        safe_reciprocal(4.0 * minimum_ring.g - 4.0),
+	        safe_reciprocal(4.0 * minimum_ring.b - 4.0));
+	vec3 lobe_rgb = max(-hit_min, hit_max);
+	const float rcas_limit = 0.25 - (1.0 / 16.0);
+	float lobe = max(-rcas_limit, min(max(lobe_rgb.r, max(lobe_rgb.g, lobe_rgb.b)), 0.0));
+	lobe *= pc.sharpness;
+
+	float reciprocal_weight = safe_reciprocal(4.0 * lobe + 1.0);
+	vec3 color = (lobe * (north + west + east + south) + center) * reciprocal_weight;
+	imageStore(destination_color, pixel, vec4(srgb_to_linear(color), center_sample.a));
+}

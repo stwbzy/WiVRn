@@ -108,6 +108,8 @@ if (WIVRN_BUILD_SERVER)
 			compositor/compositor.cpp
 			compositor/layer_squasher.cpp
 			compositor/foveation.cpp
+			compositor/fsr_config.cpp
+			compositor/fsr_upscaler.cpp
 			compositor/pacer.cpp
 
 			encoder/encoder_settings.cpp
@@ -281,9 +283,23 @@ if (WIVRN_BUILD_SERVER)
 		SHADERS
 			"${_monado_src}/src/xrt/compositor/shaders/layer.comp"
 			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/foveation.comp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/fsr_easu.comp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/fsr_rcas.comp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/spacewarp_optical_flow.comp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/spacewarp_extrapolate.comp"
 		)
 
 	target_compile_definitions(wivrn-server PRIVATE JSON_DIAGNOSTICS=1)
+
+	if(WIVRN_BUILD_TEST)
+		add_executable(fsr-config-test
+			compositor/fsr_config.cpp
+			compositor/fsr_config_test.cpp)
+		target_compile_features(fsr-config-test PRIVATE cxx_std_20)
+		target_include_directories(fsr-config-test PRIVATE .)
+		target_link_libraries(fsr-config-test PRIVATE wivrn-common wivrn-external)
+		add_test(NAME fsr-config COMMAND fsr-config-test)
+	endif()
 
 	configure_file(dist/wivrn.service.in wivrn.service)
 	install(FILES ${CMAKE_CURRENT_BINARY_DIR}/wivrn.service

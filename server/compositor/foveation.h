@@ -57,7 +57,8 @@ class foveation
 	vk::raii::PipelineLayout layout;
 	std::array<vk::raii::Pipeline, 2> pipeline;
 	vk::raii::DescriptorPool descriptor_pool;
-	vk::DescriptorSet descriptor_set;
+	std::array<vk::DescriptorSet, 2> descriptor_sets{};
+	uint32_t descriptor_index = 0;
 
 	// parameters used for last computation
 	struct P

@@ -26,6 +26,7 @@
 
 #include "encoder/encoder_settings.h"
 #include "foveation.h"
+#include "fsr_upscaler.h"
 #include "layer_squasher.h"
 #include "pacer.h"
 #include "utils/wivrn_vk_bundle.h"
@@ -34,8 +35,11 @@
 
 #include <array>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 namespace wivrn
@@ -86,7 +90,7 @@ private:
 
 	std::array<encoder_settings, 3> settings;
 
-	std::array<image, 2> images;
+	std::array<image, 4> images;
 	vk::raii::CommandBuffer cmd;
 	vk::raii::Semaphore sem;
 	uint64_t sem_value = 0;
@@ -96,16 +100,14 @@ private:
 	wivrn::pacer pacer;
 
 	layer_squasher squasher;
+	std::optional<wivrn::fsr_upscaler> spatial_upscaler;
 	wivrn::foveation foveation;
 
 	std::array<std::unique_ptr<video_encoder>, 3> encoders;
 
-#ifdef __cpp_lib_atomic_lock_free_type_aliases
-	using status_type = std::atomic_signed_lock_free;
-#else
-	using status_type = std::atomic_int8_t;
-#endif
-	status_type encode_request{-1}; // id of the image to encode
+	std::mutex encode_mutex;
+	std::condition_variable encode_cv;
+	std::deque<size_t> encode_requests;
 	std::jthread encoder_thread;
 	std::atomic<bool> paused{false};
 	// Serializes frame slots/pacer state with pause and resume. A pause waits for
@@ -118,13 +120,73 @@ private:
 		comp_frame rendering{.id = -1};
 	} frame;
 
+	struct frame_generation_history
+	{
+		image_allocation image;
+		std::array<vk::raii::ImageView, 2> views;
+		bool valid = false;
+
+		frame_generation_history(vk_bundle &, vk::Extent3D);
+	};
+
+	struct frame_generation_backend
+	{
+		image_allocation output;
+		vk::raii::Sampler sampler;
+		std::array<vk::raii::ImageView, 2> output_views;
+		vk::raii::DescriptorSetLayout ds_layout;
+		vk::raii::PipelineLayout layout;
+		vk::raii::Pipeline pipeline;
+		vk::raii::DescriptorPool descriptor_pool;
+		std::array<vk::DescriptorSet, 2> descriptor_sets{};
+		bool output_valid = false;
+
+		frame_generation_backend(vk_bundle &, vk::Extent3D);
+	};
+
+	struct frame_generation_flow
+	{
+		image_allocation motion;
+		std::array<vk::raii::ImageView, 2> motion_views;
+		vk::raii::Sampler sampler;
+		vk::raii::DescriptorSetLayout ds_layout;
+		vk::raii::PipelineLayout layout;
+		vk::raii::Pipeline pipeline;
+		vk::raii::DescriptorPool descriptor_pool;
+		std::array<vk::DescriptorSet, 2> descriptor_sets{};
+		bool output_valid = false;
+
+		frame_generation_flow(vk_bundle &, vk::Extent3D);
+	};
+
+	std::optional<frame_generation_history> frame_history;
+	std::optional<frame_generation_backend> frame_generation;
+	std::optional<frame_generation_flow> frame_generation_flow_backend;
+
 	struct
 	{
 		bool requested = false;
+		bool handoff_requested = false;
+		bool handoff_enabled = false;
+		bool double_rate_requested = false;
+		bool double_rate_enabled = false;
+		bool color_only_requested = false;
+		bool history_enabled = false;
+		bool backend_enabled = false;
 		bool reported = false;
 		bool last_inputs_ready = false;
+		uint32_t last_ready_views = 0;
 		uint64_t frames = 0;
+		uint64_t history_captures = 0;
+		uint64_t backend_dispatches = 0;
+		uint64_t handoff_frames = 0;
+		uint64_t double_rate_pairs = 0;
 	} frame_generation_probe;
+
+	int64_t previous_display_time_ns = 0;
+	std::array<XrPosef, 2> previous_view_poses{};
+	std::array<XrFovf, 2> previous_view_fovs{};
+	bool previous_view_poses_valid = false;
 
 	xrt_result_t begin_session(const xrt_begin_session_info * info)
 	{
@@ -156,6 +218,17 @@ private:
 
 	xrt_result_t layer_commit(xrt_graphics_sync_handle_t sync_handle);
 	void inspect_frame_generation_inputs();
+	bool dispatch_frame_generation_motion(vk::raii::CommandBuffer &,
+	                                      const std::array<vk::ImageView, 2> &,
+	                                      const std::array<XrPosef, 2> &,
+	                                      const std::array<XrFovf, 2> &);
+	bool dispatch_frame_generation_candidate(vk::raii::CommandBuffer &,
+	                                         const std::array<vk::ImageView, 2> &,
+	                                         const std::array<XrPosef, 2> &,
+	                                         const std::array<XrFovf, 2> &,
+	                                         const std::array<XrPosef, 2> &,
+	                                         const std::array<XrFovf, 2> &);
+	void capture_frame_generation_history(vk::raii::CommandBuffer &);
 
 	xrt_result_t get_display_refresh_rate(float * out_display_refresh_rate_hz);
 

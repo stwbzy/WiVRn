@@ -73,6 +73,7 @@ private:
 	std::jthread worker;
 
 	std::array<frame_info, 8> in_flight_frames;
+	uint64_t stream_frame_multiplier = 1;
 
 public:
 	pacer(uint64_t frame_duration);
@@ -80,6 +81,7 @@ public:
 
 	uint64_t get_frame_duration() const;
 	void set_frame_duration(uint64_t frame_duration);
+	void set_stream_frame_multiplier(uint64_t multiplier);
 
 	void predict(
 	        int64_t & out_frame_id,

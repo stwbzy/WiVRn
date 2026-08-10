@@ -152,15 +152,15 @@ vk::raii::DescriptorPool make_ds_pool(wivrn::vk_bundle & vk)
 	std::array pool_sizes{
 	        vk::DescriptorPoolSize{
 	                .type = vk::DescriptorType::eCombinedImageSampler,
-	                .descriptorCount = 2,
+	                .descriptorCount = 2 * 2,
 	        },
 	        vk::DescriptorPoolSize{
 	                .type = vk::DescriptorType::eStorageImage,
-	                .descriptorCount = 2,
+	                .descriptorCount = 2 * 2,
 	        },
 	        vk::DescriptorPoolSize{
 	                .type = vk::DescriptorType::eStorageBuffer,
-	                .descriptorCount = 1,
+	                .descriptorCount = 2,
 	        },
 	};
 	vk::raii::DescriptorPool res{
@@ -416,15 +416,19 @@ foveation::foveation(wivrn::vk_bundle & bundle, vk::Extent3D foveated_size) :
         ds_layout(make_ds_layout(bundle)),
         layout(make_layout(bundle, ds_layout)),
         pipeline(make_pipelines(bundle, layout, foveated_size.width / 2)),
-        descriptor_pool(make_ds_pool(bundle)),
-        descriptor_set(bundle.device.allocateDescriptorSets(vk::DescriptorSetAllocateInfo{
-                .descriptorPool = descriptor_pool,
-                .descriptorSetCount = 1,
-                .pSetLayouts = &*ds_layout,
-        })[0]
-                               .release())
+        descriptor_pool(make_ds_pool(bundle))
 {
-	bundle.name(descriptor_set, "foveation descriptor set");
+	std::array layouts{*ds_layout, *ds_layout};
+	auto sets = bundle.device.allocateDescriptorSets(vk::DescriptorSetAllocateInfo{
+	        .descriptorPool = descriptor_pool,
+	        .descriptorSetCount = uint32_t(descriptor_sets.size()),
+	        .pSetLayouts = layouts.data(),
+	});
+	for (auto [i, set]: std::ranges::enumerate_view(sets))
+	{
+		descriptor_sets[i] = set;
+		bundle.name(descriptor_sets[i], std::format("foveation descriptor set {}", i));
+	}
 }
 
 void foveation::update_tracking(const from_headset::tracking & tracking)
@@ -593,6 +597,7 @@ std::array<to_headset::foveation_parameter, 2> foveation::foveate(
         std::array<xrt_fov, 2> src_fov,
         bool alpha)
 {
+	const auto descriptor_set = descriptor_sets[descriptor_index++ % descriptor_sets.size()];
 	update_ubo(cmd, flip_y, src_rect, src_fov);
 	auto ubo = gpu_buffer.data<ubo_data>();
 
