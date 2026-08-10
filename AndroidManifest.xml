@@ -147,5 +147,12 @@
                 <data android:scheme="wivrn+tcp" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name="org.meumeu.wivrn.RestartActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:process=":restart"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
     </application>
 </manifest>

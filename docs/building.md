@@ -50,6 +50,63 @@ To also instrument Monado under the same switch, use the `server-tracing-monado`
 
 See [profiling](profiling.md) for how to run the server with tracing and capture/analyse traces.
 
+## Experimental FSR Frame Generation build
+
+For the current WiVRn FSR work, use the reproducible server preset and keep
+the generated runtime in the build tree:
+
+```bash
+cmake --preset server-no-system-boost \
+  -DWIVRN_BUILD_TEST=ON \
+  -DEigen3_DIR=/home/stwby/Proyectos/deps/eigen-install/share/eigen3/cmake \
+  -DCMAKE_PREFIX_PATH=/home/stwby/Proyectos/deps/local
+cmake --build build-server-no-system-boost -j2
+```
+
+This build includes the opt-in OpenXR metadata validation/transport and the
+compositor diagnostic probe, but it has no Space Warp/FSR3 synthesis backend
+and does not replace the installed WiVRn runtime. To inspect the input path
+while developing the PC server, start the build-tree server explicitly with:
+
+```bash
+WIVRN_FSR_FRAME_GENERATION=1 \
+  build-server-no-system-boost/server/wivrn-server
+```
+
+The probe is read-only: it reports projection/depth layers and any transported
+motion-vector metadata, then keeps normal composition. See
+[fsr-frame-generation.md](fsr-frame-generation.md) for the fork status,
+runtime architecture, and acceptance criteria.
+
+### OpenXR diagnostic harness
+
+The test build also produces a standalone Vulkan/OpenXR harness. It does not
+launch VRChat, write swapchain pixels, or synthesize frames:
+
+```bash
+cmake --build build-server-no-system-boost \
+  --target wivrn-fsr-openxr-harness -j2
+
+XR_RUNTIME_JSON="$PWD/build-server-no-system-boost/openxr_wivrn-dev.json" \
+  build-server-no-system-boost/tools/wivrn-fsr-openxr-harness \
+  --normal --frames 1
+```
+
+Use `--frame-synthesis` or `--space-warp` to submit the corresponding
+per-view metadata path. The harness creates two color swapchains and, for the
+metadata modes, two motion-vector and two depth swapchains. It is a structural
+probe only. The current build-tree runtime and server completed a 20,000-frame
+`--frame-synthesis` run, demonstrating extension negotiation, validation, IPC
+transport, and `views=2`; it does not demonstrate FSR3 image generation.
+
+Always pair the build-tree OpenXR manifest and harness with the server from the
+same build directory. Do not use `IPC_IGNORE_VERSION=1` to bridge an installed
+runtime and an unrelated server: their IPC layouts may differ even if the
+version check is bypassed. The variable was used during the structural test
+only with matching build-tree components. See
+[fsr-frame-generation.md](fsr-frame-generation.md#diagnostic-harness) for the
+exact command and interpretation.
+
 # Dashboard
 
 The WiVRn dashboard requires Qt6, and the WiVRn server.
@@ -82,7 +139,18 @@ sdkmanager --sdk_root="${HOME}/Android" --licenses
 
 Install the correct cmake version with
 ```bash
-sdkmanager --install "cmake;3.31.5"
+sdkmanager --sdk_root="${HOME}/Android" --install \
+  "cmake;3.31.5" \
+  "ndk;29.0.14206865"
+```
+
+This checkout pins `android.ndkVersion` to `29.0.14206865` (NDK r29). Gradle
+expects that exact side-by-side version under
+`$ANDROID_HOME/ndk/29.0.14206865`; having an unrelated NDK on `PATH` is not
+sufficient. Verify it before building:
+
+```bash
+test -d "$ANDROID_HOME/ndk/29.0.14206865"
 ```
 
 #### Apk signing
@@ -102,10 +170,21 @@ From the main directory.
 export ANDROID_HOME=~/Android
 export JAVA_HOME=/usr/lib/jvm/java-17-openjdk/
 
+./gradlew assembleDebug
 ./gradlew assembleRelease
 ```
 
-Outputs will be in `build/outputs/apk/release/WiVRn-release.apk`
+Outputs are written below `build/outputs/apk/debug/` and
+`build/outputs/apk/release/`. In this fork the local artifacts are:
+
+```text
+build/outputs/apk/debug/WiVRn-fsr-debug.apk
+build/outputs/apk/release/WiVRn-fsr-release-unsigned.apk
+```
+
+The debug artifact uses the Gradle debug key. A release artifact remains
+unsigned when no release keystore is configured; do not distribute it until it
+has been signed and verified.
 
 #### Install apk with adb
 Before using adb you must enable usb debugging on your device:
@@ -123,8 +202,15 @@ adb start-server
 adb devices
 
 # Install apk
-adb install build/outputs/apk/release/WiVRn-release.apk
+adb install -r build/outputs/apk/debug/WiVRn-fsr-debug.apk
 
 # When you're done, you can stop the adb server
 adb kill-server
+```
+
+For the lifecycle unit test in a configured server build:
+
+```bash
+ctest --test-dir build-server-no-system-boost \
+  --output-on-failure -R connection-lifecycle
 ```

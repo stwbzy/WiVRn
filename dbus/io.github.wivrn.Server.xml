@@ -27,6 +27,9 @@
 
 	<interface name="io.github.wivrn.Server">
 		<method name="Disconnect"/>
+		<method name="DisconnectWithMode">
+			<arg type="s" name="Mode"/>
+		</method>
 		<method name="Quit"/>
 		<method name="RevokeKey">
 			<arg type="s" name="PublicKey"/>
@@ -42,6 +45,13 @@
 		<method name="DisablePairing"/>
 
 		<property name="HeadsetConnected"      type="b" access="read"/>
+		<property name="ConnectionState"       type="s" access="read"/>
+		<property name="ConnectionReason"      type="s" access="read"/>
+		<property name="ConnectionGeneration"  type="t" access="read"/>
+		<property name="ConnectionAttempts"    type="t" access="read"/>
+		<property name="SuccessfulReconnections" type="t" access="read"/>
+		<property name="ReconnectionExpirations" type="t" access="read"/>
+		<property name="DiscardedPackets"      type="t" access="read"/>
 		<property name="SessionRunning"        type="b" access="read"/>
 		<property name="SteamCommand"          type="s" access="read"/>
 		<property name="JsonConfiguration"     type="s" access="readwrite"/>

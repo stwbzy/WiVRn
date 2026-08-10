@@ -38,6 +38,12 @@ public:
 	incorrect_pin();
 };
 
+class incompatible_resume : public std::runtime_error
+{
+public:
+	incompatible_resume();
+};
+
 class wivrn_connection
 {
 public:
@@ -52,8 +58,12 @@ private:
 	typed_socket<TCP, from_headset::packets, to_headset::packets> control;
 	typed_socket<UDP, from_headset::packets, to_headset::packets> stream;
 	std::atomic<bool> active = false;
+	std::atomic<uint64_t> generation = 0;
+	std::atomic<uint64_t> discarded_packets = 0;
 	std::string pin;
 	encryption_state state;
+	std::string authenticated_public_key;
+	std::string resume_token;
 
 	from_headset::headset_info_packet info_packet;
 
@@ -73,6 +83,18 @@ public:
 	{
 		return active;
 	}
+	uint64_t get_generation() const
+	{
+		return generation.load();
+	}
+	uint64_t get_discarded_packets() const
+	{
+		return discarded_packets.load();
+	}
+	void discard_packet()
+	{
+		++discarded_packets;
+	}
 	void reset(std::stop_token stop, TCP && tcp, std::function<void()> tick = {});
 	void shutdown();
 
@@ -82,7 +104,11 @@ public:
 		try
 		{
 			if (active)
+			{
+				if constexpr (requires { packet.connection_generation = uint64_t{}; })
+					packet.connection_generation = generation.load();
 				control.send(std::forward<T>(packet));
+			}
 		}
 		catch (...)
 		{
@@ -98,6 +124,8 @@ public:
 		{
 			if (active)
 			{
+				if constexpr (requires { packet.connection_generation = uint64_t{}; })
+					packet.connection_generation = generation.load();
 				if (stream)
 					stream.send(std::forward<T>(packet));
 				else
@@ -129,8 +157,15 @@ public:
 		fds[2].fd = wivrn_ipc_socket_monado->get_fd();
 		fds[2].events = POLLIN;
 
-		while (auto packet = stream.receive_pending())
-			std::visit(std::forward<T>(visitor), std::move(*packet));
+		try
+		{
+			while (auto packet = stream.receive_pending())
+				std::visit(std::forward<T>(visitor), std::move(*packet));
+		}
+		catch (const deserialization_error &)
+		{
+			++discarded_packets;
+		}
 		while (auto packet = control.receive_pending())
 			std::visit(std::forward<T>(visitor), std::move(*packet));
 
@@ -139,26 +174,47 @@ public:
 			throw std::system_error(errno, std::system_category());
 
 		if (fds[0].revents & (POLLHUP | POLLERR))
+		{
+			active = false;
 			throw std::runtime_error("Error on stream socket");
+		}
 
 		if (fds[1].revents & (POLLHUP | POLLERR))
+		{
+			active = false;
 			throw std::runtime_error("Error on control socket");
+		}
 
 		if (fds[2].revents & (POLLHUP | POLLERR))
 			throw std::runtime_error("Error on IPC socket");
 
 		if (fds[0].revents & POLLIN)
 		{
-			auto packet = stream.receive();
-			if (packet)
-				std::visit(std::forward<T>(visitor), std::move(*packet));
+			try
+			{
+				auto packet = stream.receive();
+				if (packet)
+					std::visit(std::forward<T>(visitor), std::move(*packet));
+			}
+			catch (const deserialization_error &)
+			{
+				++discarded_packets;
+			}
 		}
 
 		if (fds[1].revents & POLLIN)
 		{
-			auto packet = control.receive();
-			if (packet)
-				std::visit(std::forward<T>(visitor), std::move(*packet));
+			try
+			{
+				auto packet = control.receive();
+				if (packet)
+					std::visit(std::forward<T>(visitor), std::move(*packet));
+			}
+			catch (...)
+			{
+				active = false;
+				throw;
+			}
 		}
 
 		if (fds[2].revents & POLLIN)

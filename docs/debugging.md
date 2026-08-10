@@ -8,6 +8,8 @@ This guide covers debugging techniques for WiVRn, including log collection, cras
 - [Collecting Logs](#collecting-logs)
   - [HMD Client Logs](#hmd-client-logs)
   - [Server Logs](#server-logs)
+- [Connection Lifecycle](#connection-lifecycle)
+- [Virtual Body Trackers](#virtual-body-trackers)
 - [Starting Components for Debugging](#starting-components-for-debugging)
   - [HMD Client](#hmd-client)
   - [Server](#server)
@@ -43,6 +45,17 @@ adb uninstall ${WIVRN_PKG}
 # Install the debug APK
 adb install /path/to/wivrn-standard-debug.apk
 ```
+
+A clean reinstall clears the persisted resume token. Do not uninstall or clear
+application data while testing reconnection of an existing PC session. Install
+the matching APK in place instead:
+
+```bash
+adb install -r build/outputs/apk/debug/WiVRn-fsr-debug.apk
+```
+
+Use the clean-install procedure only before starting a new session or when a
+deliberately invalid token is part of the test.
 
 ---
 
@@ -99,6 +112,135 @@ XRT_LOG=debug XRT_COMPOSITOR_LOG=debug WIVRN_DUMP_VIDEO=/tmp/video-dump wivrn-se
 The video dump can be played back with `mpv` or other media players to verify what video was being sent to the HMD.
 
 There will be multiple files in the directory, one for each video stream per codec. For example, `/tmp/video-dump-0.h264`.
+
+## Connection Lifecycle
+
+The state model, ownership rules, protocol packets, and expected sequences are
+specified in [connection-lifecycle.md](connection-lifecycle.md). This section
+focuses on field diagnosis.
+
+Every server transition is logged once in this form:
+
+```text
+Connection state=reconnecting reason=peer_closed generation=3 previous_duration_ms=81234
+```
+
+The states are `listening`, `handshaking`, `streaming`, `reconnecting`, `paused`, `stopping`, and
+`failed`. Expected close reasons are `user_requested`, `peer_closed`, `network_timeout`,
+`transport_error`, `protocol_error`, `incompatible_resume`, and `server_shutdown`.
+
+The same state is available over D-Bus, without interpreting log text:
+
+```bash
+busctl --user get-property io.github.wivrn.Server /io/github/wivrn/Server \
+  io.github.wivrn.Server ConnectionState
+busctl --user get-property io.github.wivrn.Server /io/github/wivrn/Server \
+  io.github.wivrn.Server ConnectionReason
+busctl --user get-property io.github.wivrn.Server /io/github/wivrn/Server \
+  io.github.wivrn.Server ConnectionGeneration
+busctl --user get-property io.github.wivrn.Server /io/github/wivrn/Server \
+  io.github.wivrn.Server ConnectionAttempts
+busctl --user get-property io.github.wivrn.Server /io/github/wivrn/Server \
+  io.github.wivrn.Server SuccessfulReconnections
+busctl --user get-property io.github.wivrn.Server /io/github/wivrn/Server \
+  io.github.wivrn.Server ReconnectionExpirations
+busctl --user get-property io.github.wivrn.Server /io/github/wivrn/Server \
+  io.github.wivrn.Server DiscardedPackets
+```
+
+`HeadsetConnected` becomes true only after the complete crypto, transport, headset-info and
+Monado-session handshake. During an accidental link loss it becomes false while the detailed
+state is `reconnecting`. The headset displays its local lobby and a countdown instead of the last
+streamed frame.
+
+Useful counters are exposed as `ConnectionAttempts`, `SuccessfulReconnections`,
+`ReconnectionExpirations`, and `DiscardedPackets`. A rising discarded-packet count immediately
+after resume is expected: it records datagrams rejected from an obsolete connection generation.
+
+To exercise the voluntary paths:
+
+```bash
+wivrnctl disconnect --mode pause
+wivrnctl disconnect --mode terminate
+```
+
+For a link-loss test, interrupt Wi-Fi for less than 30 seconds. A successful run must show
+`streaming → reconnecting → handshaking → streaming` with a higher generation. A longer outage
+must end in `failed reason=network_timeout` and release the session. `incompatible_resume` means
+the reconnect did not present both the paired headset key and the active session token, or its
+codec/resolution/FOV/features no longer match.
+
+The headset stores the last completed session token as `resume_token` in the application's private
+configuration directory with owner-only permissions. This lets Android recreate the WiVRn process
+and still resume, and it does not bind the token to the headset's current IP address. Clearing app
+data or deleting that file invalidates a paused session; the server still requires the same paired
+headset key, so the token alone is not sufficient to resume it.
+
+Some Meta runtimes keep returning `XR_ERROR_RUNTIME_FAILURE` from `xrWaitFrame` after the network
+has already resumed. WiVRn first retries that transient error. If the connection is healthy for two
+seconds but the local frame loop remains stuck, it recreates only the Android XR activity through a
+short-lived helper process and resumes with the persisted token. The PC OpenXR application remains
+alive; logs may therefore show a second `peer_closed → handshaking → streaming` transition and one
+additional connection generation. The helper process terminates itself after launching the clean XR
+activity.
+
+The physical Quest 3S validation on 2026-08-09 exercised this fallback. The
+server first resumed the transport as generation 2; because Meta's local frame
+loop stayed failed, the client recreated its XR activity and resumed the same
+PC session as generation 3. The final D-Bus snapshot was `streaming`,
+`HeadsetConnected=true`, `ConnectionAttempts=3`,
+`SuccessfulReconnections=2`, and `ReconnectionExpirations=0`.
+
+With a USB cable attached, a controlled physical cut can be reproduced with:
+
+```bash
+adb shell svc wifi disable
+# Wait until the server logs state=reconnecting, but less than 30 seconds.
+adb shell svc wifi enable
+```
+
+Always restore Wi-Fi even if the test fails. A Meta runtime fallback can add a
+second resume transition; this is expected only when the log first reports the
+stuck OpenXR frame loop.
+
+For repeatable transport faults, run the included proxy and configure the headset to connect to
+the proxy port:
+
+```bash
+tools/wivrn-fault-proxy.py SERVER_ADDRESS --listen-port 9758
+```
+
+Its interactive commands include `drop tcp on`, `drop udp on`, `drop both on`, `delay udp 250`,
+`close tcp`, `status`, and the corresponding `off` commands. `--close-tcp-after BYTES` closes a
+connection during its handshake. Restarting it with `--upstream-bind ADDRESS` permits testing a
+new source address while keeping the resume token and paired headset identity unchanged.
+
+---
+
+## Virtual Body Trackers
+
+On Quest, enable **Hand and body tracking** in the headset's movement tracking settings. Then open
+WiVRn's **Settings → Tracking**, enable **Body tracking**, accept the Meta body-tracking permission
+prompt, and select the entries under **Virtual body trackers**.
+
+The tracker selection is saved in the headset configuration and is sent to the server immediately
+when it changes during a stream. The server keeps disabled virtual trackers available but untracked,
+so they can be enabled again without restarting the OpenXR application. A successful update produces
+messages like:
+
+```text
+Virtual body tracker mask updated: 0xff
+Virtual tracker wivrn-left-knee enabled
+```
+
+If **Body tracking** was already enabled before installing a build that requests the Meta permission,
+toggle it off and on once from the lobby. If the mask message never appears, verify that the headset
+and server were built from the same source revision. If the mask appears but poses remain unavailable,
+check the Quest movement tracking setting and collect the WiVRn client log with:
+
+```bash
+adb logcat '*:S' WiVRn:V
+```
 
 ---
 

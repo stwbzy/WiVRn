@@ -223,6 +223,13 @@ void video_encoder::reset()
 	idr->reset();
 }
 
+void video_encoder::discard_frame()
+{
+	encode_slot = (encode_slot + 1) % num_slots;
+	state[encode_slot] = idle;
+	state[encode_slot].notify_all();
+}
+
 void video_encoder::set_bitrate(uint32_t bitrate_bps)
 {
 	pending_bitrate = bitrate_bps * bitrate_multiplier;
@@ -281,6 +288,7 @@ void video_encoder::encode(wivrn_session & cnx,
 
 	// Prepare the video shard template
 	shard.stream_item_idx = stream_idx;
+	shard.connection_generation = cnx.connection_generation();
 	shard.frame_idx = frame_index;
 	shard.shard_idx = 0;
 	shard.view_info = view_info;

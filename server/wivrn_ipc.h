@@ -42,6 +42,20 @@ struct headset_connected
 struct headset_disconnected
 {};
 
+struct connection_state_changed
+{
+	wivrn::server_connection_state state;
+	wivrn::connection_close_reason reason;
+	uint64_t generation;
+	uint64_t previous_state_duration_ms;
+	wivrn::connection_counters counters;
+};
+
+struct connection_counters_changed
+{
+	wivrn::connection_counters counters;
+};
+
 struct server_error
 {
 	std::string where;
@@ -55,6 +69,8 @@ using packets = std::variant<
         wivrn::from_headset::stream_tab_changed,
         headset_connected,
         headset_disconnected,
+		connection_state_changed,
+		connection_counters_changed,
         server_error>;
 } // namespace from_monado
 
@@ -64,7 +80,9 @@ struct stop
 {};
 
 struct disconnect
-{};
+{
+	wivrn::disconnect_mode mode = wivrn::disconnect_mode::default_mode;
+};
 
 struct set_bitrate
 {

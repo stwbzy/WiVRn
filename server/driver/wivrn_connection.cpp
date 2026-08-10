@@ -22,12 +22,14 @@
 #include "protocol_version.h"
 #include "secrets.h"
 #include "smp.h"
+#include "util/u_logging.h"
 #include "wivrn_ipc.h"
 #include "wivrn_packets.h"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <chrono>
 #include <poll.h>
+#include <random>
 #include <regex>
 #include <sys/socket.h>
 #include <variant>
@@ -56,11 +58,25 @@ static std::string clean_key(std::string key)
 wivrn::incorrect_pin::incorrect_pin() :
         std::runtime_error("Incorrect PIN") {}
 
+wivrn::incompatible_resume::incompatible_resume() :
+        std::runtime_error("Headset identity or session token does not match the paused session") {}
+
+static std::string make_resume_token()
+{
+	std::random_device random;
+	static constexpr char digits[] = "0123456789abcdef";
+	std::string token(64, '0');
+	for (char & c: token)
+		c = digits[random() & 0xf];
+	return token;
+}
+
 wivrn::wivrn_connection::wivrn_connection(std::stop_token stop_token, encryption_state state, std::string pin, TCP && tcp) :
         control(std::move(tcp)),
         stream(-1),
         pin(pin),
-        state(state)
+        state(state),
+        resume_token(make_resume_token())
 {
 	init(stop_token);
 }
@@ -68,6 +84,7 @@ wivrn::wivrn_connection::wivrn_connection(std::stop_token stop_token, encryption
 void wivrn::wivrn_connection::init(std::stop_token stop_token, std::function<void()> tick)
 {
 	active = false;
+	const uint64_t next_generation = generation.load() + 1;
 
 	sockaddr_in6 server_address;
 	socklen_t len = sizeof(server_address);
@@ -139,7 +156,18 @@ void wivrn::wivrn_connection::init(std::stop_token stop_token, std::function<voi
 
 				// Ignore packets sent from the wrong address
 				if (memcmp(&peer_addr.sin6_addr, &client_address.sin6_addr, sizeof(peer_addr.sin6_addr)) == 0)
-					return std::make_pair(raw_packet.deserialize<from_headset::packets>(), (int)htons(peer_addr.sin6_port));
+				{
+					try
+					{
+						return std::make_pair(raw_packet.deserialize<from_headset::packets>(), (int)htons(peer_addr.sin6_port));
+					}
+					catch (const deserialization_error &)
+					{
+						// Late datagrams from the previous generation use an obsolete
+						// key and must not abort the new handshake.
+						++discarded_packets;
+					}
+				}
 			}
 
 			if (fds[1].revents & POLLIN)
@@ -175,9 +203,23 @@ void wivrn::wivrn_connection::init(std::stop_token stop_token, std::function<voi
 	}
 
 	crypto::key headset_key = crypto::key::from_public_key(crypto_handshake.public_key);
+	const std::string clean_public_key = clean_key(crypto_handshake.public_key);
+	const bool identity_matches = clean_public_key == authenticated_public_key;
+	const bool resume_token_matches = crypto_handshake.resume_token == resume_token;
+	if (generation.load() != 0 && (!identity_matches || !resume_token_matches))
+	{
+		U_LOG_W("Resume credentials rejected: identity_match=%s token_present=%s token_match=%s",
+		        identity_matches ? "true" : "false",
+		        crypto_handshake.resume_token.empty() ? "false" : "true",
+		        resume_token_matches ? "true" : "false");
+		control.send(to_headset::crypto_handshake{
+		        .state = to_headset::crypto_handshake::crypto_state::server_busy,
+		});
+		throw incompatible_resume{};
+	}
 	bool is_public_key_known = std::ranges::any_of(
 	        wivrn::known_keys(),
-	        [key = clean_key(crypto_handshake.public_key)](const wivrn::headset_key & k) {
+	        [key = clean_public_key](const wivrn::headset_key & k) {
 		        return k.public_key == key;
 	        });
 
@@ -248,7 +290,11 @@ void wivrn::wivrn_connection::init(std::stop_token stop_token, std::function<voi
 	if (not std::holds_alternative<from_headset::crypto_handshake>(receive().first))
 		throw std::runtime_error("No handshake received from client");
 
-	control.send(to_headset::handshake{.stream_port = port});
+	control.send(to_headset::handshake{
+	        .stream_port = port,
+	        .connection_generation = next_generation,
+	        .resume_token = resume_token,
+	});
 
 	auto [stream_handshake, client_port] = receive(10s, true);
 
@@ -269,10 +315,16 @@ void wivrn::wivrn_connection::init(std::stop_token stop_token, std::function<voi
 		stream = decltype(stream)(-1);
 	}
 
-	control.send(to_headset::handshake{.stream_port = port});
+	control.send(to_headset::handshake{
+	        .stream_port = port,
+	        .connection_generation = next_generation,
+	        .resume_token = resume_token,
+	});
 
 	info_packet = std::get<from_headset::headset_info_packet>(receive(10s).first);
 
+	authenticated_public_key = clean_public_key;
+	generation = next_generation;
 	active = true;
 
 	if (state == encryption_state::pairing and not is_public_key_known)
@@ -286,6 +338,7 @@ void wivrn::wivrn_connection::init(std::stop_token stop_token, std::function<voi
 
 void wivrn::wivrn_connection::reset(std::stop_token stop, TCP && tcp, std::function<void()> tick)
 {
+	active = false;
 	if (stream)
 		stream = decltype(stream)();
 
@@ -295,6 +348,7 @@ void wivrn::wivrn_connection::reset(std::stop_token stop, TCP && tcp, std::funct
 
 void wivrn::wivrn_connection::shutdown()
 {
+	active = false;
 	if (stream)
 		::shutdown(stream.get_fd(), SHUT_RDWR);
 	if (control)

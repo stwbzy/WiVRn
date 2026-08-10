@@ -35,6 +35,7 @@
 #include <array>
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <thread>
 
 namespace wivrn
@@ -106,12 +107,24 @@ private:
 #endif
 	status_type encode_request{-1}; // id of the image to encode
 	std::jthread encoder_thread;
+	std::atomic<bool> paused{false};
+	// Serializes frame slots/pacer state with pause and resume. A pause waits for
+	// an in-flight commit, then guarantees that no later commit can enqueue work.
+	std::mutex frame_mutex;
 
 	struct
 	{
 		comp_frame waited{.id = -1};
 		comp_frame rendering{.id = -1};
 	} frame;
+
+	struct
+	{
+		bool requested = false;
+		bool reported = false;
+		bool last_inputs_ready = false;
+		uint64_t frames = 0;
+	} frame_generation_probe;
 
 	xrt_result_t begin_session(const xrt_begin_session_info * info)
 	{
@@ -142,6 +155,7 @@ private:
 	};
 
 	xrt_result_t layer_commit(xrt_graphics_sync_handle_t sync_handle);
+	void inspect_frame_generation_inputs();
 
 	xrt_result_t get_display_refresh_rate(float * out_display_refresh_rate_hz);
 
@@ -192,6 +206,7 @@ public:
 	void update_foveation_center_override(const from_headset::override_foveation_center &);
 
 	void resume();
+	void pause();
 
 	void on_feedback(const from_headset::feedback &, const clock_offset &);
 };

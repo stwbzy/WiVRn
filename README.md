@@ -134,6 +134,31 @@ The same overrides should work for other VR applications distributed as Flatpaks
 
 See [building](docs/building.md) for building the [dashboard](docs/building.md#dashboard), [server (PC)](docs/building.md#server-pc), and [client (headset)](docs/building.md#client-headset)
 
+## Experimental FSR Frame Generation fork
+
+This checkout contains an experimental branch for integrating runtime-owned
+OpenXR Space Warp and AMD FSR3 Frame Generation without modifying VRChat or
+any game binary. Reproducible build commands, current capability limitations,
+and safety rules are documented in
+[docs/fsr-frame-generation.md](docs/fsr-frame-generation.md).
+
+As of 2026-08-09, the build-tree runtime validates and transports stereo color,
+depth, and motion-vector metadata for `XR_EXT_frame_synthesis` and
+`XR_FB_space_warp`. The standalone `wivrn-fsr-openxr-harness` completed a
+20,000-frame structural run against the matching server, including a voluntary
+disconnect/resume. A physical Quest 3S Wi-Fi cut also resumed the same PC
+OpenXR application across connection generations.
+
+Frame Generation itself is still not active. The compositor deliberately logs
+`backend=none fallback=normal-composition`; no generated image is submitted and
+the current evidence does not demonstrate visual 45→90 interpolation. The next
+FSR milestone is a real Vulkan/FSR3 backend, synchronization, and frame pacing.
+
+The same branch also contains the deterministic connection lifecycle described
+in [docs/connection-lifecycle.md](docs/connection-lifecycle.md). See the
+[current handoff](docs/handoff.md) and [roadmap](docs/roadmap.md) before further
+runtime work.
+
 
 # Configuration
 Most settings are controlled through the headset app, while the server has configuration for items that are specific to the server. Use the dashboard to edit the latter, or see [configuration](docs/configuration.md) for editing it manually.

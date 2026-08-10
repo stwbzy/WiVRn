@@ -406,6 +406,7 @@ void scenes::stream::tracking()
 
 			tracking.production_timestamp = t0;
 			tracking.timestamp = t0 + pattern[pattern_position].prediction_ns;
+			tracking.connection_generation = network_session->generation();
 			tracking.view_flags = {};
 			tracking.state_flags = {};
 			tracking.views = {};
@@ -496,6 +497,7 @@ void scenes::stream::tracking()
 								        at_time,
 								        from_headset::hand_tracking::left,
 								        locate_hands(*left_hand, world_space, tracking.timestamp));
+								hands.back().connection_generation = tracking.connection_generation;
 							}
 							break;
 						case wivrn::device_id::RIGHT_HAND:
@@ -506,6 +508,7 @@ void scenes::stream::tracking()
 								        at_time,
 								        from_headset::hand_tracking::right,
 								        locate_hands(*right_hand, world_space, tracking.timestamp));
+								hands.back().connection_generation = tracking.connection_generation;
 							}
 							break;
 						case wivrn::device_id::BODY:
@@ -515,6 +518,7 @@ void scenes::stream::tracking()
 								                   auto packet = b.locate_spaces(at_time, world_space);
 								                   packet.timestamp = at_time;
 								                   packet.production_timestamp = tracking.production_timestamp;
+								                   packet.connection_generation = tracking.connection_generation;
 								                   body.push_back(packet);
 							                   },
 							           },

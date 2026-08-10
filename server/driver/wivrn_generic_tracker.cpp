@@ -117,8 +117,11 @@ xrt_result_t wivrn_generic_tracker::get_tracked_pose(xrt_input_name name, int64_
 {
 	XrTime production_timestamp;
 
-	if (!enabled)
-		return XRT_ERROR_INPUT_UNSUPPORTED;
+	if (!enabled.load(std::memory_order_acquire))
+	{
+		*res = {};
+		return XRT_SUCCESS;
+	}
 
 	if (name == XRT_INPUT_GENERIC_TRACKER_POSE)
 	{
@@ -139,6 +142,7 @@ void wivrn_generic_tracker::update_tracking(XrTime produced_timestamp, XrTime ti
 
 void wivrn_generic_tracker::set_enabled(bool enabled)
 {
-	this->enabled = enabled;
+	if (this->enabled.exchange(enabled, std::memory_order_acq_rel) != enabled)
+		U_LOG_I("Virtual tracker %s %s", serial, enabled ? "enabled" : "disabled");
 }
 } // namespace wivrn

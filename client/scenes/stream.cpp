@@ -214,8 +214,9 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 {
 	std::shared_ptr<stream> self{new stream{std::move(server_name), parent_scene}};
 	self->network_session = std::move(network_session);
+	self->transition_connection(client_connection_state::connecting);
 
-	self->network_session->send_control([&]() {
+	self->reconnect_info = [&]() {
 		from_headset::headset_info_packet info{
 		        .language = application::get_messages_info().language,
 		        .country = application::get_messages_info().country,
@@ -345,7 +346,8 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 			info.supported_codecs = decoder::supported_codecs();
 
 		return info;
-	}());
+	}();
+	self->network_session->send_control(from_headset::headset_info_packet{self->reconnect_info});
 
 	self->network_session->send_control(from_headset::session_state_changed{
 	        .state = application::get_session_state(),
@@ -609,6 +611,10 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 	assert(handle);
 	if (!application::is_visible())
 		return;
+	const auto connection_state = state_.load();
+	if (connection_state == state::reconnecting || connection_state == state::disconnecting ||
+	    connection_state == state::shutdown)
+		return;
 
 	{
 		std::shared_lock lock(decoder_mutex);
@@ -622,10 +628,20 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 			std::swap(handle, decoders[stream].latest_frames[handle->feedback.frame_index % decoders[stream].latest_frames.size()]);
 		}
 
-		if (state_ != state::streaming and not(decoders[0].empty() or decoders[1].empty()))
+		if (not(decoders[0].empty() or decoders[1].empty()))
 		{
-			set_state(state::streaming);
-			spdlog::info("Stream scene ready at t={}", instance.now());
+			state expected = state::initializing;
+			bool became_streaming = state_.compare_exchange_strong(expected, state::streaming);
+			if (!became_streaming && expected == state::stalled)
+				became_streaming = state_.compare_exchange_strong(expected, state::streaming);
+			if (became_streaming)
+			{
+				transition_connection(client_connection_state::streaming);
+				network_session->send_control(from_headset::stream_ready{
+				        .connection_generation = network_session->generation(),
+				});
+				spdlog::info("Stream scene ready at t={}", instance.now());
+			}
 		}
 	}
 
@@ -824,7 +840,28 @@ bool scenes::stream::is_gui_interactable() const
 void scenes::stream::render(const XrFrameState & frame_state)
 {
 	if (state_ == state::shutdown)
+	{
 		application::pop_scene();
+		return;
+	}
+	if (state_ == state::reconnecting)
+	{
+		// The parent lobby is rendered locally and never contains a stale streamed frame.
+		application::pop_scene();
+		return;
+	}
+	if (state_ == state::disconnecting)
+	{
+		const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                         std::chrono::steady_clock::now().time_since_epoch())
+		                         .count();
+		if (disconnect_ack_received.load() || now >= disconnect_deadline_ns.load())
+		{
+			exit();
+			application::pop_scene();
+			return;
+		}
+	}
 
 	display_time_phase = frame_state.predictedDisplayPeriod ? frame_state.predictedDisplayTime % frame_state.predictedDisplayPeriod : 0;
 	display_time_period = frame_state.predictedDisplayPeriod;
@@ -1201,6 +1238,66 @@ void scenes::stream::render(const XrFrameState & frame_state)
 void scenes::stream::exit()
 {
 	state_ = state::shutdown;
+	transition_connection(client_connection_state::lobby,
+	                      reconnect_reason == connection_close_reason::none
+	                              ? connection_close_reason::user_requested
+	                              : reconnect_reason.load());
+	if (network_session)
+		network_session->shutdown();
+}
+
+void scenes::stream::request_disconnect(disconnect_mode mode)
+{
+	if (state_ == state::shutdown || state_ == state::disconnecting)
+		return;
+	disconnect_ack_received = false;
+	set_state(state::disconnecting);
+	transition_connection(client_connection_state::disconnecting, connection_close_reason::user_requested);
+	disconnect_deadline_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+	                                 (std::chrono::steady_clock::now() + std::chrono::milliseconds(750)).time_since_epoch())
+	                                 .count();
+	network_session->send_control(from_headset::disconnect_request{
+	        .mode = mode,
+	        .reason = connection_close_reason::user_requested,
+	});
+}
+
+void scenes::stream::transition_connection(client_connection_state state, connection_close_reason reason)
+{
+	const uint64_t generation = network_session ? network_session->generation() : 0;
+	if (auto event = connection_lifecycle.transition(state, reason, generation))
+	{
+		spdlog::info("Client connection state={} reason={} generation={} previous_duration_ms={}",
+		             to_string(event->state),
+		             to_string(event->reason),
+		             event->generation,
+		             event->previous_state_duration_ms);
+	}
+}
+
+uint32_t scenes::stream::reconnect_remaining_seconds() const
+{
+	const auto deadline = reconnect_deadline_ns.load();
+	if (deadline == 0)
+		return 0;
+	const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+	                         std::chrono::steady_clock::now().time_since_epoch())
+	                         .count();
+	if (now >= deadline)
+		return 0;
+	return static_cast<uint32_t>((deadline - now + 999'999'999) / 1'000'000'000);
+}
+
+void scenes::stream::reset_stream_resources()
+{
+	audio_handle.reset();
+	std::unique_lock decoder_lock(decoder_mutex);
+	std::unique_lock frame_lock(frames_mutex);
+	current_blit_handles.fill(nullptr);
+	for (auto & item: decoders)
+		item = {};
+	video_stream_description.reset();
+	query_pool_filled = false;
 }
 
 void scenes::stream::setup(const to_headset::video_stream_description & description)

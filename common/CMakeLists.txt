@@ -41,6 +41,10 @@ if (WIVRN_BUILD_DASHBOARD OR WIVRN_BUILD_SERVER)
         PUBLIC wivrn-common-base)
 
     if (WIVRN_BUILD_TEST)
+        add_executable(connection-lifecycle-test connection_lifecycle_test.cpp)
+        target_compile_features(connection-lifecycle-test PRIVATE cxx_std_20)
+        add_test(NAME connection-lifecycle COMMAND connection-lifecycle-test)
+
         add_executable(list-apps
             test_application.cpp
         )

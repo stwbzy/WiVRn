@@ -59,6 +59,7 @@ struct configuration
 	bool use_steamvr_lh = false;
 	bool hid_forwarding = false;
 	bool tcp_only = false;
+	disconnect_policy disconnect_policy_setting = disconnect_policy::pause;
 	int port = wivrn::default_port;
 	std::string hostname = wivrn::hostname();
 	service_publication publication = service_publication::avahi;

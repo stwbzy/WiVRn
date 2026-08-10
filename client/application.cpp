@@ -1720,7 +1720,67 @@ void application::loop()
 			}
 			scene->set_focused(true);
 
-			XrFrameState framestate = xr_session.wait_frame();
+			XrFrameState framestate;
+			try
+			{
+				framestate = xr_session.wait_frame();
+			}
+			catch (const std::system_error & e)
+			{
+				const auto now = std::chrono::steady_clock::now();
+				constexpr auto retry_window = 30s;
+#ifdef __ANDROID__
+				constexpr auto recovered_connection_grace_period = 2s;
+#endif
+				const bool retry_already_active = transient_frame_wait_failure_since &&
+				                                  now - *transient_frame_wait_failure_since < retry_window;
+				const bool transient_runtime_failure = e.code().category() == xr::error_category() &&
+				                                       e.code().value() == XR_ERROR_RUNTIME_FAILURE;
+				if (!transient_runtime_failure ||
+				    (!scene->allow_transient_frame_wait_failure() && !retry_already_active))
+					throw;
+
+				if (!transient_frame_wait_failure_since)
+				{
+					transient_frame_wait_failure_since = now;
+					transient_frame_wait_failure_count = 0;
+					spdlog::warn("OpenXR frame wait temporarily failed during reconnection; retrying for up to 30 seconds");
+				}
+				++transient_frame_wait_failure_count;
+
+#ifdef __ANDROID__
+				if (scene->connection_recovered_while_frame_wait_failed())
+				{
+					if (!recovered_connection_frame_wait_failure_since)
+						recovered_connection_frame_wait_failure_since = now;
+					else if (now - *recovered_connection_frame_wait_failure_since >= recovered_connection_grace_period)
+					{
+						spdlog::warn("The connection recovered but the OpenXR frame loop did not; restarting the local XR activity");
+						request_restart_after_runtime_failure();
+						return;
+					}
+				}
+				else
+				{
+					recovered_connection_frame_wait_failure_since.reset();
+				}
+#endif
+
+				std::this_thread::sleep_for(100ms);
+				return;
+			}
+
+			if (transient_frame_wait_failure_since)
+			{
+				spdlog::info("OpenXR frame wait recovered after {} ms and {} retries",
+				             std::chrono::duration_cast<std::chrono::milliseconds>(
+				                     std::chrono::steady_clock::now() - *transient_frame_wait_failure_since)
+				                     .count(),
+				             transient_frame_wait_failure_count);
+				transient_frame_wait_failure_since.reset();
+				recovered_connection_frame_wait_failure_since.reset();
+				transient_frame_wait_failure_count = 0;
+			}
 
 			auto t1 = std::chrono::steady_clock::now();
 
@@ -1737,6 +1797,17 @@ void application::loop()
 }
 
 #ifdef __ANDROID__
+void application::request_restart_after_runtime_failure()
+{
+	if (restart_requested)
+		return;
+
+	jni::object<""> activity(app_info.native_app->activity->clazz);
+	activity.call<void>("restartAfterRuntimeFailure");
+	restart_requested = true;
+	exit_requested = true;
+}
+
 void application::run()
 {
 	auto application_thread = utils::named_thread("application_thread", [&]() {

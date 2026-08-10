@@ -76,6 +76,14 @@ NLOHMANN_JSON_SERIALIZE_ENUM(
                 {service_publication::avahi, "avahi"},
         })
 
+NLOHMANN_JSON_SERIALIZE_ENUM(
+        disconnect_policy,
+        {
+                {disconnect_policy(-1), ""},
+                {disconnect_policy::pause, "pause"},
+                {disconnect_policy::terminate, "terminate"},
+        })
+
 void configuration::set_config_file(const std::filesystem::path & path)
 {
 	config_file = resolve_path(path);
@@ -205,6 +213,13 @@ configuration::configuration()
 
 		if (auto it = json.find("tcp-only"); it != json.end())
 			tcp_only = *it;
+
+		if (auto it = json.find("disconnect-policy"); it != json.end())
+		{
+			disconnect_policy_setting = *it;
+			if (disconnect_policy_setting == wivrn::disconnect_policy(-1))
+				throw std::runtime_error("invalid disconnect policy " + it->get<std::string>());
+		}
 
 		if (auto it = json.find("port"); it != json.end())
 			port = *it;

@@ -34,6 +34,7 @@
 #include <openxr/openxr.h>
 
 #include "packed_quaternion.h"
+#include "connection_lifecycle.h"
 #include "smp.h"
 #include "wivrn_serialization_types.h"
 
@@ -218,6 +219,7 @@ struct audio_data
 	XrTime timestamp;
 	std::span<uint8_t> payload;
 	data_holder data;
+	uint64_t connection_generation = 0;
 };
 
 namespace from_headset
@@ -227,6 +229,9 @@ struct crypto_handshake
 	uint64_t protocol_version;
 	std::string public_key; // In PEM format
 	std::string name;
+	// Empty on a new session. A reconnect must present the token issued by the
+	// server for the active session; the paired public key is checked as well.
+	std::string resume_token;
 };
 
 struct pin_check_1
@@ -342,6 +347,29 @@ struct handshake
 	// Sending this on TCP means connection will be TCP only
 };
 
+struct disconnect_request
+{
+	disconnect_mode mode = disconnect_mode::default_mode;
+	connection_close_reason reason = connection_close_reason::user_requested;
+};
+
+struct disconnect_ack
+{
+	disconnect_mode mode = disconnect_mode::default_mode;
+};
+
+struct heartbeat
+{
+	uint64_t connection_generation = 0;
+	uint64_t sequence = 0;
+	bool stream_channel = false;
+};
+
+struct stream_ready
+{
+	uint64_t connection_generation = 0;
+};
+
 enum pose_flags : uint8_t
 {
 	orientation_valid = 1 << 0,
@@ -436,6 +464,7 @@ struct tracking
 	};
 
 	std::variant<std::monostate, android_face, fb_face2, htc_face> face;
+	uint64_t connection_generation = 0;
 };
 
 struct derived_pose
@@ -443,6 +472,7 @@ struct derived_pose
 	device_id source;
 	device_id target;
 	XrPosef relation;
+	uint64_t connection_generation = 0;
 };
 
 struct hand_tracking
@@ -468,6 +498,7 @@ struct hand_tracking
 	XrTime timestamp;
 	hand_id hand;
 	std::optional<std::array<pose, XR_HAND_JOINT_COUNT_EXT>> joints;
+	uint64_t connection_generation = 0;
 };
 
 struct meta_body
@@ -505,6 +536,7 @@ struct meta_body
 		std::array<packed_pose, XR_FULL_BODY_JOINT_COUNT_META - 1> joints;
 	};
 	std::variant<std::monostate, fb_joints, meta_joints> joints;
+	uint64_t connection_generation = 0;
 };
 
 struct meta_body_skeleton
@@ -533,6 +565,7 @@ struct bd_body
 	XrTime production_timestamp;
 	XrTime timestamp;
 	std::array<pose, XR_BODY_JOINT_COUNT_BD> joints;
+	uint64_t connection_generation = 0;
 };
 
 struct htc_body
@@ -549,6 +582,7 @@ struct htc_body
 	XrTime production_timestamp;
 	XrTime timestamp;
 	std::array<pose, max_tracked_poses> poses;
+	uint64_t connection_generation = 0;
 };
 
 struct inputs
@@ -560,6 +594,7 @@ struct inputs
 		XrTime last_change_time;
 	};
 	std::vector<input_value> values;
+	uint64_t connection_generation = 0;
 };
 
 struct hid
@@ -607,6 +642,7 @@ struct timesync_response
 {
 	XrTime query;
 	XrTime response;
+	uint64_t connection_generation = 0;
 };
 
 struct feedback
@@ -627,6 +663,7 @@ struct feedback
 	XrTime displayed;
 
 	uint8_t times_displayed;
+	uint64_t connection_generation = 0;
 };
 
 struct battery
@@ -634,6 +671,7 @@ struct battery
 	float charge;
 	bool present;
 	bool charging;
+	uint64_t connection_generation = 0;
 };
 
 struct refresh_rate_changed
@@ -699,6 +737,10 @@ using packets = std::variant<
         feedback,
         audio_data,
         handshake,
+		disconnect_request,
+		disconnect_ack,
+		heartbeat,
+		stream_ready,
         tracking,
         derived_pose,
         hand_tracking,
@@ -735,6 +777,7 @@ struct crypto_handshake
 		client_already_paired,
 		pairing_disabled,
 		incompatible_version,
+		server_busy,
 	};
 
 	std::string public_key; // In PEM format
@@ -755,6 +798,34 @@ struct handshake
 {
 	// -1 if stream socket should not be used
 	int stream_port;
+	uint64_t connection_generation;
+	std::string resume_token;
+};
+
+struct disconnect_request
+{
+	disconnect_mode mode = disconnect_mode::default_mode;
+	connection_close_reason reason = connection_close_reason::user_requested;
+};
+
+struct disconnect_ack
+{
+	disconnect_mode mode = disconnect_mode::default_mode;
+};
+
+struct connection_state
+{
+	server_connection_state state = server_connection_state::listening;
+	connection_close_reason reason = connection_close_reason::none;
+	uint64_t connection_generation = 0;
+	uint32_t retry_remaining_ms = 0;
+};
+
+struct heartbeat
+{
+	uint64_t connection_generation = 0;
+	uint64_t sequence = 0;
+	bool stream_channel = false;
 };
 
 struct server_message
@@ -822,6 +893,8 @@ public:
 	// 1 right
 	// 2 alpha
 	uint8_t stream_item_idx;
+	// Packets from a superseded socket generation must never reach a decoder.
+	uint64_t connection_generation = 0;
 	// Counter increased for each frame
 	uint64_t frame_idx;
 	// Identifier of the shard within the frame
@@ -863,11 +936,13 @@ struct haptics
 	std::chrono::nanoseconds duration;
 	float frequency;
 	float amplitude;
+	uint64_t connection_generation = 0;
 };
 
 struct timesync_query
 {
 	XrTime query;
+	uint64_t connection_generation = 0;
 };
 
 struct tracking_control
@@ -939,6 +1014,10 @@ using packets = std::variant<
         pin_check_2,
         pin_check_4,
         handshake,
+		disconnect_request,
+		disconnect_ack,
+		connection_state,
+		heartbeat,
         server_message,
         audio_stream_description,
         video_stream_description,

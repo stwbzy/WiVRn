@@ -1,0 +1,353 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: no name <git-am@invalid>
+Date: Wed, 29 Jul 2026 20:00:00 -0600
+Subject: [PATCH] xrt: transport frame-synthesis metadata through IPC
+
+Carry per-view motion-vector and depth metadata, together with their
+swapchain IDs, through the internal XRT compositor and IPC interfaces.
+The receiving compositor remains responsible for deciding whether to use it.
+---
+ src/xrt/compositor/util/comp_base.c        | 13 +++++++++
+ src/xrt/compositor/util/comp_layer_accum.c | 30 +++++++++++++++++++
+ src/xrt/compositor/util/comp_layer_accum.h | 16 +++++++++-
+ src/xrt/include/xrt/xrt_compositor.h      | 46 +++++++++++++++++++++++++++++
+ src/xrt/ipc/client/ipc_client_compositor.c | 34 ++++++++++++++++++++
+ src/xrt/ipc/server/ipc_server_handler.c   | 44 +++++++++++++++++++++++++
+ src/xrt/ipc/shared/ipc_protocol.h         |  6 +--
+ 7 files changed, 182 insertions(+), 7 deletions(-)
+
+diff --git a/src/xrt/compositor/util/comp_base.c b/src/xrt/compositor/util/comp_base.c
+index fa3428be9..2762f53bb 100644
+--- a/src/xrt/compositor/util/comp_base.c
++++ b/src/xrt/compositor/util/comp_base.c
+@@ -120,6 +120,18 @@ base_layer_projection_depth(struct xrt_compositor *xc,
+ 	return comp_layer_accum_projection_depth(&cb->layer_accum, xsc, d_xsc, data);
+ }
+ 
++static xrt_result_t
++base_layer_projection_frame_synthesis(struct xrt_compositor *xc,
++                                      struct xrt_device *xdev,
++                                      struct xrt_swapchain *xsc[XRT_MAX_VIEWS],
++                                      struct xrt_swapchain *mv_xsc[XRT_MAX_VIEWS],
++                                      struct xrt_swapchain *d_xsc[XRT_MAX_VIEWS],
++                                      const struct xrt_layer_data *data)
++{
++	struct comp_base *cb = comp_base(xc);
++	return comp_layer_accum_projection_frame_synthesis(&cb->layer_accum, xsc, mv_xsc, d_xsc, data);
++}
++
+ static xrt_result_t
+ base_layer_quad(struct xrt_compositor *xc,
+                 struct xrt_device *xdev,
+@@ -224,6 +236,7 @@ comp_base_init(struct comp_base *cb)
+ 	iface->layer_begin = base_layer_begin;
+ 	iface->layer_projection = base_layer_projection;
+ 	iface->layer_projection_depth = base_layer_projection_depth;
++	iface->layer_projection_frame_synthesis = base_layer_projection_frame_synthesis;
+ 	iface->layer_quad = base_layer_quad;
+ 	iface->layer_cube = base_layer_cube;
+ 	iface->layer_cylinder = base_layer_cylinder;
+diff --git a/src/xrt/compositor/util/comp_layer_accum.c b/src/xrt/compositor/util/comp_layer_accum.c
+index 7314daff8..6ed14d04b 100644
+--- a/src/xrt/compositor/util/comp_layer_accum.c
++++ b/src/xrt/compositor/util/comp_layer_accum.c
+@@ -46,6 +46,13 @@ comp_layer_get_depth_swapchain(const struct comp_layer *cl, uint32_t swapchain_i
+ 	return cl->sc_array[XRT_MAX_VIEWS + swapchain_index];
+ }
+ 
++struct xrt_swapchain *
++comp_layer_get_motion_vector_swapchain(const struct comp_layer *cl, uint32_t swapchain_index)
++{
++	assert(cl->data.type == XRT_LAYER_PROJECTION);
++	return cl->sc_array[XRT_MAX_VIEWS + swapchain_index];
++}
++
+ xrt_result_t
+ comp_layer_accum_begin(struct comp_layer_accum *cla, const struct xrt_layer_frame_data *data)
+ {
+@@ -98,6 +105,29 @@ comp_layer_accum_projection_depth(struct comp_layer_accum *cla,
+ 	return XRT_SUCCESS;
+ }
+ 
++xrt_result_t
++comp_layer_accum_projection_frame_synthesis(struct comp_layer_accum *cla,
++                                             struct xrt_swapchain *xsc[XRT_MAX_VIEWS],
++                                             struct xrt_swapchain *mv_xsc[XRT_MAX_VIEWS],
++                                             struct xrt_swapchain *d_xsc[XRT_MAX_VIEWS],
++                                             const struct xrt_layer_data *data)
++{
++	uint32_t layer_id = cla->layer_count;
++
++	struct comp_layer *layer = &cla->layers[layer_id];
++	U_ZERO_ARRAY(layer->sc_array);
++	for (uint32_t i = 0; i < data->view_count; ++i) {
++		layer->sc_array[i] = xsc[i];
++		layer->sc_array[XRT_MAX_VIEWS + i] = mv_xsc[i];
++		layer->sc_array[2 * XRT_MAX_VIEWS + i] = d_xsc[i];
++	}
++	layer->data = *data;
++
++	cla->layer_count++;
++
++	return XRT_SUCCESS;
++}
++
+ xrt_result_t
+ comp_layer_accum_quad(struct comp_layer_accum *cla, struct xrt_swapchain *xsc, const struct xrt_layer_data *data)
+ {
+diff --git a/src/xrt/compositor/util/comp_layer_accum.h b/src/xrt/compositor/util/comp_layer_accum.h
+index 58ac8e2cb..e906d826b 100644
+--- a/src/xrt/compositor/util/comp_layer_accum.h
++++ b/src/xrt/compositor/util/comp_layer_accum.h
+@@ -35,11 +35,11 @@ struct xrt_swapchain;
+ struct comp_layer
+ {
+ 	/*!
+-	 * Up to two compositor swapchains referenced per view (color and depth) for a layer.
++	 * Up to three compositor swapchains referenced per view (color, motion vector, and depth) for a layer.
+ 	 *
+ 	 * Unused elements should be set to null.
+ 	 */
+-	struct xrt_swapchain *sc_array[XRT_MAX_VIEWS * 2];
++	struct xrt_swapchain *sc_array[XRT_MAX_VIEWS * 3];
+ 
+ 	/*!
+ 	 * All basic (trivially-serializable) data associated with a layer.
+@@ -71,6 +71,10 @@ comp_layer_get_swapchain(const struct comp_layer *cl, uint32_t swapchain_index);
+ struct xrt_swapchain *
+ comp_layer_get_depth_swapchain(const struct comp_layer *cl, uint32_t swapchain_index);
+ 
++/*! Get a motion-vector swapchain associated with a frame-synthesis layer. */
++struct xrt_swapchain *
++comp_layer_get_motion_vector_swapchain(const struct comp_layer *cl, uint32_t swapchain_index);
++
+ 
+ 
+ /*!
+@@ -126,6 +130,14 @@ comp_layer_accum_projection_depth(struct comp_layer_accum *cla,
+                                   struct xrt_swapchain *xsc[XRT_MAX_VIEWS],
+                                   struct xrt_swapchain *d_xsc[XRT_MAX_VIEWS],
+                                   const struct xrt_layer_data *data);
++
++/*! Accumulate a projection layer with motion-vector and depth swapchains. */
++xrt_result_t
++comp_layer_accum_projection_frame_synthesis(struct comp_layer_accum *cla,
++                                             struct xrt_swapchain *xsc[XRT_MAX_VIEWS],
++                                             struct xrt_swapchain *mv_xsc[XRT_MAX_VIEWS],
++                                             struct xrt_swapchain *d_xsc[XRT_MAX_VIEWS],
++                                             const struct xrt_layer_data *data);
+ /*!
+  * Accumulate swapchain and data for a quad layer for a frame.
+  *
+diff --git a/src/xrt/include/xrt/xrt_compositor.h b/src/xrt/include/xrt/xrt_compositor.h
+index 621005b74..b94139e93 100644
+--- a/src/xrt/include/xrt/xrt_compositor.h
++++ b/src/xrt/include/xrt/xrt_compositor.h
+@@ -228,6 +228,27 @@ struct xrt_sub_image
+ 	struct xrt_normalized_rect norm_rect;
+ };
+ 
++/*! Metadata submitted with a projection view for runtime frame synthesis. */
++struct xrt_layer_frame_synthesis_data
++{
++	//! True when the application supplied frame-synthesis metadata for this view.
++	bool valid;
++	//! XrFrameSynthesisInfoFlagsEXT or XrCompositionLayerSpaceWarpInfoFlagsFB.
++	uint64_t layer_flags;
++	//! Motion-vector interpretation: value * scale + offset.
++	float motion_vector_scale[4];
++	float motion_vector_offset[4];
++	//! Application-space transform since the previous submitted frame.
++	struct xrt_pose app_space_delta_pose;
++	//! Motion-vector and depth sub-images. Their swapchains are carried separately.
++	struct xrt_sub_image motion_vector;
++	struct xrt_sub_image depth;
++	float min_depth;
++	float max_depth;
++	float near_z;
++	float far_z;
++};
++
+ /*!
+  * All of the pure data values associated with a single view in a projection
+  * layer.
+@@ -241,6 +262,8 @@ struct xrt_layer_projection_view_data
+ 
+ 	struct xrt_fov fov;
+ 	struct xrt_pose pose;
++
++	struct xrt_layer_frame_synthesis_data frame_synthesis;
+ };
+ 
+ /*!
+@@ -1276,6 +1299,15 @@ struct xrt_compositor
+ 	                                       struct xrt_swapchain *d_xsc[XRT_MAX_VIEWS],
+ 	                                       const struct xrt_layer_data *data);
+ 
++	/* Projection layer with per-view motion-vector and depth swapchains. */
++	xrt_result_t (*layer_projection_frame_synthesis)(
++	    struct xrt_compositor *xc,
++	    struct xrt_device *xdev,
++	    struct xrt_swapchain *xsc[XRT_MAX_VIEWS],
++	    struct xrt_swapchain *mv_xsc[XRT_MAX_VIEWS],
++	    struct xrt_swapchain *d_xsc[XRT_MAX_VIEWS],
++	    const struct xrt_layer_data *data);
++
+ 	/*!
+ 	 * Adds a quad layer for submission, the center of the quad is specified
+ 	 * by the pose and extends outwards from it.
+@@ -1748,6 +1780,20 @@ xrt_comp_layer_projection_depth(struct xrt_compositor *xc,
+ 	return xc->layer_projection_depth(xc, xdev, xsc, d_xsc, data);
+ }
+ 
++XRT_NONNULL_ALL static inline xrt_result_t
++xrt_comp_layer_projection_frame_synthesis(struct xrt_compositor *xc,
++                                          struct xrt_device *xdev,
++                                          struct xrt_swapchain *xsc[XRT_MAX_VIEWS],
++                                          struct xrt_swapchain *mv_xsc[XRT_MAX_VIEWS],
++                                          struct xrt_swapchain *d_xsc[XRT_MAX_VIEWS],
++                                          const struct xrt_layer_data *data)
++{
++	if (xc->layer_projection_frame_synthesis == NULL) {
++		return XRT_ERROR_NOT_IMPLEMENTED;
++	}
++	return xc->layer_projection_frame_synthesis(xc, xdev, xsc, mv_xsc, d_xsc, data);
++}
++
+ /*!
+  * @copydoc xrt_compositor::layer_quad
+  *
+diff --git a/src/xrt/ipc/client/ipc_client_compositor.c b/src/xrt/ipc/client/ipc_client_compositor.c
+index 4fc89d529..87c557cb3 100644
+--- a/src/xrt/ipc/client/ipc_client_compositor.c
++++ b/src/xrt/ipc/client/ipc_client_compositor.c
+@@ -642,6 +642,39 @@ ipc_compositor_layer_projection_depth(struct xrt_compositor *xc,
+ 	return XRT_SUCCESS;
+ }
+ 
++static xrt_result_t
++ipc_compositor_layer_projection_frame_synthesis(struct xrt_compositor *xc,
++                                                struct xrt_device *xdev,
++                                                struct xrt_swapchain *xsc[XRT_MAX_VIEWS],
++                                                struct xrt_swapchain *mv_xsc[XRT_MAX_VIEWS],
++                                                struct xrt_swapchain *d_xsc[XRT_MAX_VIEWS],
++                                                const struct xrt_layer_data *data)
++{
++	struct ipc_client_compositor *icc = ipc_client_compositor(xc);
++
++	assert(data->type == XRT_LAYER_PROJECTION);
++
++	struct ipc_shared_memory *ism = icc->ipc_c->ism;
++	struct ipc_layer_slot *slot = &ism->slots[icc->layers.slot_id];
++	struct ipc_layer_entry *layer = &slot->layers[icc->layers.layer_count];
++	for (uint32_t i = 0; i < data->view_count; ++i) {
++		struct ipc_client_swapchain *xscn = ipc_client_swapchain(xsc[i]);
++		struct ipc_client_swapchain *mv_xscn = ipc_client_swapchain(mv_xsc[i]);
++		struct ipc_client_swapchain *d_xscn = ipc_client_swapchain(d_xsc[i]);
++
++		layer->swapchain_ids[i] = xscn->id;
++		layer->swapchain_ids[XRT_MAX_VIEWS + i] = mv_xscn->id;
++		layer->swapchain_ids[2 * XRT_MAX_VIEWS + i] = d_xscn->id;
++	}
++	layer->xdev_id = 0; //! @todo Real id.
++	layer->data = *data;
++
++	// Increment the number of layers.
++	icc->layers.layer_count++;
++
++	return XRT_SUCCESS;
++}
++
+ static xrt_result_t
+ handle_layer(struct xrt_compositor *xc,
+              struct xrt_device *xdev,
+@@ -901,6 +934,7 @@ ipc_compositor_init(struct ipc_client_compositor *icc, struct xrt_compositor_nat
+ 	icc->base.base.layer_begin = ipc_compositor_layer_begin;
+ 	icc->base.base.layer_projection = ipc_compositor_layer_projection;
+ 	icc->base.base.layer_projection_depth = ipc_compositor_layer_projection_depth;
++	icc->base.base.layer_projection_frame_synthesis = ipc_compositor_layer_projection_frame_synthesis;
+ 	icc->base.base.layer_quad = ipc_compositor_layer_quad;
+ 	icc->base.base.layer_cube = ipc_compositor_layer_cube;
+ 	icc->base.base.layer_cylinder = ipc_compositor_layer_cylinder;
+diff --git a/src/xrt/ipc/server/ipc_server_handler.c b/src/xrt/ipc/server/ipc_server_handler.c
+index e0e9dca2f..88a2eaa51 100644
+--- a/src/xrt/ipc/server/ipc_server_handler.c
++++ b/src/xrt/ipc/server/ipc_server_handler.c
+@@ -1160,6 +1160,44 @@ _update_projection_layer_depth(struct xrt_compositor *xc,
+ 	return true;
+ }
+ 
++static bool
++_update_projection_layer_frame_synthesis(struct xrt_compositor *xc,
++                                         volatile struct ipc_client_state *ics,
++                                         volatile struct ipc_layer_entry *layer,
++                                         uint32_t i)
++{
++	uint32_t xdevi = layer->xdev_id;
++	struct xrt_device *xdev = NULL;
++	GET_XDEV_OR_RETURN(ics, xdevi, xdev);
++	if (xdev == NULL) {
++		U_LOG_E("Invalid xdev for frame-synthesis projection layer #%u!", i);
++		return false;
++	}
++
++	struct xrt_swapchain *xcs[XRT_MAX_VIEWS];
++	struct xrt_swapchain *mv_xcs[XRT_MAX_VIEWS];
++	struct xrt_swapchain *d_xcs[XRT_MAX_VIEWS];
++	struct xrt_layer_data *data = (struct xrt_layer_data *)&layer->data;
++
++	for (uint32_t j = 0; j < data->view_count; ++j) {
++		xcs[j] = ics->xscs[layer->swapchain_ids[j]];
++		mv_xcs[j] = ics->xscs[layer->swapchain_ids[XRT_MAX_VIEWS + j]];
++		d_xcs[j] = ics->xscs[layer->swapchain_ids[2 * XRT_MAX_VIEWS + j]];
++		if (xcs[j] == NULL || mv_xcs[j] == NULL || d_xcs[j] == NULL) {
++			U_LOG_E("Invalid swap chain for frame-synthesis projection layer #%u!", i);
++			return false;
++		}
++	}
++
++	xrt_result_t xret = xrt_comp_layer_projection_frame_synthesis(xc, xdev, xcs, mv_xcs, d_xcs, data);
++	if (xret != XRT_SUCCESS) {
++		U_LOG_E("Frame-synthesis projection layer #%u is not supported by the compositor!", i);
++		return false;
++	}
++
++	return true;
++}
++
+ static bool
+ do_single(struct xrt_compositor *xc,
+           volatile struct ipc_client_state *ics,
+@@ -1327,6 +1365,13 @@ _update_layers(volatile struct ipc_client_state *ics, struct xrt_compositor *xc,
+ 
+ 		switch (layer->data.type) {
+ 		case XRT_LAYER_PROJECTION:
++			if (layer->data.proj.v[0].frame_synthesis.valid &&
++			    !_update_projection_layer_frame_synthesis(xc, ics, layer, i)) {
++				return false;
++			}
++			if (layer->data.proj.v[0].frame_synthesis.valid) {
++				break;
++			}
+ 			if (!_update_projection_layer(xc, ics, layer, i)) {
+ 				return false;
+ 			}
+ 			break;
+diff --git a/src/xrt/ipc/shared/ipc_protocol.h b/src/xrt/ipc/shared/ipc_protocol.h
+index d2adfcac8..5b75d3013 100644
+--- a/src/xrt/ipc/shared/ipc_protocol.h
++++ b/src/xrt/ipc/shared/ipc_protocol.h
+@@ -214,11 +214,11 @@ struct ipc_layer_entry
+ 	uint32_t xdev_id;
+ 
+ 	/*!
+-	 * Up to two indices of swapchains to use.
++	 * Up to three indices of swapchains to use.
+ 	 *
+ 	 * How many are actually used depends on the value of @p data.type
+ 	 */
+-	uint32_t swapchain_ids[XRT_MAX_VIEWS * 2];
++	uint32_t swapchain_ids[XRT_MAX_VIEWS * 3];
+ 
+ 	/*!
+ 	 * All basic (trivially-serializable) data associated with a layer,

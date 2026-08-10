@@ -1,0 +1,555 @@
+From b636f23c5b9d8acf84941f0061b9fbb2a895a831 Mon Sep 17 00:00:00 2001
+From: no name <git-am@invalid>
+Date: Wed, 29 Jul 2026 20:27:52 -0500
+Subject: [PATCH] oxr: validate and transport frame synthesis metadata
+
+---
+ CMakeLists.txt                                |   4 +
+ cmake/MonadoSetOptions.cmake                  |   2 +
+ .../oxr_extension_support.py                  |   2 +
+ src/xrt/include/xrt/xrt_config_build.h.cmake_in |   2 +
+ .../oxr/oxr_session_frame_end.c               | 318 ++++++++++++++++++
+ src/xrt/state_trackers/oxr/oxr_system.c       |  31 ++
+ 6 files changed, 359 insertions(+)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6f84169b1..ad31c83a7 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -392,6 +392,7 @@ option(XRT_FEATURE_OPENXR_FACE_TRACKING_ANDROID "Enable XR_ANDROID_face_tracking
+ option(XRT_FEATURE_OPENXR_FACE_TRACKING2_FB "Enable XR_FB_face_tracking2" ON)
+ option(XRT_FEATURE_OPENXR_FACIAL_TRACKING_HTC "Enable XR_HTC_facial_tracking" ON)
+ option(XRT_FEATURE_OPENXR_FORCE_FEEDBACK_CURL "Enable XR_MNDX_force_feedback_curl" ON)
++option(XRT_FEATURE_OPENXR_FRAME_SYNTHESIS "Enable XR_EXT_frame_synthesis metadata transport" OFF)
+ option(XRT_FEATURE_OPENXR_FUTURE_EXT "Enable XR_EXT_future" ON)
+ option(XRT_FEATURE_OPENXR_HAND_TRACKING_EXT "Enable XR_EXT_hand_tracking" ON)
+ option_with_deps(XRT_FEATURE_OPENXR_HAND_TRACKING_DATA_SOURCE_EXT DEPENDS XRT_FEATURE_OPENXR_HAND_TRACKING_EXT)
+@@ -400,6 +401,7 @@ option(XRT_FEATURE_OPENXR_HEADLESS "Enable XR_MND_headless" ON)
+ option(XRT_FEATURE_OPENXR_OVERLAY "Enable XR_EXTX_overlay" ON)
+ option(XRT_FEATURE_OPENXR_PERFORMANCE_SETTINGS "Enable XR_EXT_performance_settings" OFF)
+ option(XRT_FEATURE_OPENXR_PLANE_DETECTION "Enable XR_EXT_plane_detection" OFF)
++option(XRT_FEATURE_OPENXR_SPACE_WARP "Enable XR_FB_space_warp metadata transport" OFF)
+ option(XRT_FEATURE_OPENXR_USER_PRESENCE "Enable XR_EXT_user_presence" ON)
+ option(XRT_FEATURE_OPENXR_VISIBILITY_MASK "Enable XR_KHR_visibility_mask" ON)
+ option(XRT_FEATURE_OPENXR_VULKAN_SWAPCHAIN_FORMAT_LIST "Enable XR_KHR_vulkan_swapchain_format_list" ON)
+@@ -666,6 +668,7 @@ if(XRT_MODULE_OPENXR_STATE_TRACKER)
+ 	message(STATUS "#    FEATURE_OPENXR_FACE_TRACKING_ANDROID:                  ${XRT_FEATURE_OPENXR_FACE_TRACKING_ANDROID}")
+ 	message(STATUS "#    FEATURE_OPENXR_FACIAL_TRACKING_HTC:                    ${XRT_FEATURE_OPENXR_FACIAL_TRACKING_HTC}")
+ 	message(STATUS "#    FEATURE_OPENXR_FORCE_FEEDBACK_CURL:                    ${XRT_FEATURE_OPENXR_FORCE_FEEDBACK_CURL}")
++	message(STATUS "#    FEATURE_OPENXR_FRAME_SYNTHESIS:                       ${XRT_FEATURE_OPENXR_FRAME_SYNTHESIS}")
+ 	message(STATUS "#    FEATURE_OPENXR_FUTURE_EXT:                             ${XRT_FEATURE_OPENXR_FUTURE_EXT}")
+ 	message(STATUS "#    FEATURE_OPENXR_HAND_TRACKING_DATA_SOURCE_EXT:          ${XRT_FEATURE_OPENXR_HAND_TRACKING_DATA_SOURCE_EXT}")
+ 	message(STATUS "#    FEATURE_OPENXR_HAND_TRACKING_EXT:                      ${XRT_FEATURE_OPENXR_HAND_TRACKING_EXT}")
+@@ -695,6 +698,7 @@ if(XRT_MODULE_OPENXR_STATE_TRACKER)
+ 	message(STATUS "#    FEATURE_OPENXR_OVERLAY:                                ${XRT_FEATURE_OPENXR_OVERLAY}")
+ 	message(STATUS "#    FEATURE_OPENXR_PERFORMANCE_SETTINGS:                   ${XRT_FEATURE_OPENXR_PERFORMANCE_SETTINGS}")
+ 	message(STATUS "#    FEATURE_OPENXR_PLANE_DETECTION:                        ${XRT_FEATURE_OPENXR_PLANE_DETECTION}")
++	message(STATUS "#    FEATURE_OPENXR_SPACE_WARP:                             ${XRT_FEATURE_OPENXR_SPACE_WARP}")
+ 	message(STATUS "#    FEATURE_OPENXR_SPACE_LOCAL_FLOOR:                      ${XRT_FEATURE_OPENXR_SPACE_LOCAL_FLOOR}")
+ 	message(STATUS "#    FEATURE_OPENXR_SPACE_UNBOUNDED:                        ${XRT_FEATURE_OPENXR_SPACE_UNBOUNDED}")
+ 	message(STATUS "#    FEATURE_OPENXR_USER_PRESENCE:                          ${XRT_FEATURE_OPENXR_USER_PRESENCE}")
+diff --git a/cmake/MonadoSetOptions.cmake b/cmake/MonadoSetOptions.cmake
+index 7a6ab1d53..7e4c6c1da 100644
+--- a/cmake/MonadoSetOptions.cmake
++++ b/cmake/MonadoSetOptions.cmake
+@@ -139,6 +139,7 @@ function(monado_set_options)
+ 		XRT_FEATURE_OPENXR_FACE_TRACKING_ANDROID
+ 		XRT_FEATURE_OPENXR_FACIAL_TRACKING_HTC
+ 		XRT_FEATURE_OPENXR_FORCE_FEEDBACK_CURL
++		XRT_FEATURE_OPENXR_FRAME_SYNTHESIS
+ 		XRT_FEATURE_OPENXR_FUTURE_EXT
+ 		XRT_FEATURE_OPENXR_HAND_TRACKING_DATA_SOURCE_EXT
+ 		XRT_FEATURE_OPENXR_HAND_TRACKING_EXT
+@@ -173,6 +174,7 @@ function(monado_set_options)
+ 		XRT_FEATURE_OPENXR_OVERLAY
+ 		XRT_FEATURE_OPENXR_PERFORMANCE_SETTINGS
+ 		XRT_FEATURE_OPENXR_PLANE_DETECTION
++		XRT_FEATURE_OPENXR_SPACE_WARP
+ 		XRT_FEATURE_OPENXR_SPACE_LOCAL_FLOOR
+ 		XRT_FEATURE_OPENXR_SPACE_UNBOUNDED
+ 		XRT_FEATURE_OPENXR_USER_PRESENCE
+diff --git a/src/xrt/state_trackers/oxr/extension_support/oxr_extension_support.py b/src/xrt/state_trackers/oxr/extension_support/oxr_extension_support.py
+index 9760912bd..a47d62c14 100644
+--- a/src/xrt/state_trackers/oxr/extension_support/oxr_extension_support.py
++++ b/src/xrt/state_trackers/oxr/extension_support/oxr_extension_support.py
+@@ -72,6 +72,7 @@ EXTENSIONS = (
+     ['XR_EXT_debug_utils', 'XRT_FEATURE_OPENXR_DEBUG_UTILS'],
+     ['XR_EXT_dpad_binding'],
+     ['XR_EXT_eye_gaze_interaction', 'XRT_FEATURE_OPENXR_INTERACTION_EXT_EYE_GAZE'],
++    ['XR_EXT_frame_synthesis', 'XRT_FEATURE_OPENXR_FRAME_SYNTHESIS'],
+     ['XR_EXT_future', 'XRT_FEATURE_OPENXR_FUTURE_EXT'],
+     ['XR_EXT_hand_interaction', 'XRT_FEATURE_OPENXR_INTERACTION_EXT_HAND'],
+     ['XR_EXT_hand_tracking', 'XRT_FEATURE_OPENXR_HAND_TRACKING_EXT'],
+@@ -96,6 +97,7 @@ EXTENSIONS = (
+     ['XR_FB_face_tracking2', 'XRT_FEATURE_OPENXR_FACE_TRACKING2_FB'],
+     ['XR_FB_haptic_pcm', 'XRT_FEATURE_OPENXR_HAPTIC_PCM'],
+     ['XR_FB_passthrough', 'XRT_FEATURE_OPENXR_LAYER_FB_PASSTHROUGH'],
++    ['XR_FB_space_warp', 'XRT_FEATURE_OPENXR_SPACE_WARP'],
+     ['XR_FB_touch_controller_pro', 'XRT_FEATURE_OPENXR_INTERACTION_TOUCH_PRO'],
+     ['XR_FB_touch_controller_proximity', 'XRT_FEATURE_OPENXR_INTERACTION_FB_PROXIMITY'],
+     ['XR_HTC_facial_tracking', 'XRT_FEATURE_OPENXR_FACIAL_TRACKING_HTC'],
+diff --git a/src/xrt/include/xrt/xrt_config_build.h.cmake_in b/src/xrt/include/xrt/xrt_config_build.h.cmake_in
+index 7f0c9b0b3..3f5a7e1c8 100644
+--- a/src/xrt/include/xrt/xrt_config_build.h.cmake_in
++++ b/src/xrt/include/xrt/xrt_config_build.h.cmake_in
+@@ -61,6 +61,7 @@
+ #cmakedefine XRT_FEATURE_OPENXR_FACE_TRACKING_ANDROID
+ #cmakedefine XRT_FEATURE_OPENXR_FACIAL_TRACKING_HTC
+ #cmakedefine XRT_FEATURE_OPENXR_FORCE_FEEDBACK_CURL
++#cmakedefine XRT_FEATURE_OPENXR_FRAME_SYNTHESIS
+ #cmakedefine XRT_FEATURE_OPENXR_FUTURE_EXT
+ #cmakedefine XRT_FEATURE_OPENXR_HAND_TRACKING_DATA_SOURCE_EXT
+ #cmakedefine XRT_FEATURE_OPENXR_HAND_TRACKING_EXT
+@@ -95,6 +96,7 @@
+ #cmakedefine XRT_FEATURE_OPENXR_LAYER_FB_PASSTHROUGH
+ #cmakedefine XRT_FEATURE_OPENXR_LAYER_FB_SETTINGS
+ #cmakedefine XRT_FEATURE_OPENXR_OVERLAY
+ #cmakedefine XRT_FEATURE_OPENXR_PLANE_DETECTION
++#cmakedefine XRT_FEATURE_OPENXR_SPACE_WARP
+ #cmakedefine XRT_FEATURE_OPENXR_SPACE_LOCAL_FLOOR
+ #cmakedefine XRT_FEATURE_OPENXR_SPACE_UNBOUNDED
+ #cmakedefine XRT_FEATURE_OPENXR_USER_PRESENCE
+
+diff --git a/src/xrt/state_trackers/oxr/oxr_session_frame_end.c b/src/xrt/state_trackers/oxr/oxr_session_frame_end.c
+index 8614c20b9..8fabb9052 100644
+--- a/src/xrt/state_trackers/oxr/oxr_session_frame_end.c
++++ b/src/xrt/state_trackers/oxr/oxr_session_frame_end.c
+@@ -36,6 +36,8 @@
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <math.h>
++#include <inttypes.h>
+ #include <assert.h>
+ 
+ 
+@@ -579,6 +581,153 @@ verify_depth_layer(struct xrt_compositor *xc,
+ }
+ #endif // OXR_HAVE_KHR_composition_layer_depth
+ 
++#if defined(OXR_HAVE_EXT_frame_synthesis) || defined(OXR_HAVE_FB_space_warp)
++static XrResult
++verify_frame_synthesis_sub_image(struct oxr_logger *log,
++                                 uint32_t layer_index,
++                                 uint32_t view_index,
++                                 const char *extension_name,
++                                 const char *field_name,
++                                 const XrSwapchainSubImage *sub_image)
++{
++	if (sub_image->swapchain == XR_NULL_HANDLE) {
++		return oxr_error(log, XR_ERROR_HANDLE_INVALID,
++		                 "(frameEndInfo->layers[%u]->views[%u]->next<%s>.%s.swapchain) is XR_NULL_HANDLE",
++		                 layer_index, view_index, extension_name, field_name);
++	}
++
++	struct oxr_swapchain *sc = XRT_CAST_OXR_HANDLE_TO_PTR(struct oxr_swapchain *, sub_image->swapchain);
++	if (!sc->released.yes) {
++		return oxr_error(log, XR_ERROR_LAYER_INVALID,
++		                 "(frameEndInfo->layers[%u]->views[%u]->next<%s>.%s.swapchain) swapchain has not been released",
++		                 layer_index, view_index, extension_name, field_name);
++	}
++
++	if (sc->released.index >= (int)sc->swapchain->image_count) {
++		return oxr_error(log, XR_ERROR_RUNTIME_FAILURE,
++		                 "(frameEndInfo->layers[%u]->views[%u]->next<%s>.%s.swapchain) internal image index out of bounds",
++		                 layer_index, view_index, extension_name, field_name);
++	}
++
++	if (sc->array_layer_count <= sub_image->imageArrayIndex) {
++		return oxr_error(log, XR_ERROR_VALIDATION_FAILURE,
++		                 "(frameEndInfo->layers[%u]->views[%u]->next<%s>.%s.imageArrayIndex == %u) invalid swapchain array index (%u)",
++		                 layer_index, view_index, extension_name, field_name, sub_image->imageArrayIndex,
++		                 sc->array_layer_count);
++	}
++
++	if (sc->face_count != 1) {
++		return oxr_error(log, XR_ERROR_VALIDATION_FAILURE,
++		                 "(frameEndInfo->layers[%u]->views[%u]->next<%s>.%s.swapchain) invalid swapchain face count (expected 1, got %u)",
++		                 layer_index, view_index, extension_name, field_name, sc->face_count);
++	}
++
++	if (is_rect_neg(&sub_image->imageRect)) {
++		return oxr_error(log, XR_ERROR_SWAPCHAIN_RECT_INVALID,
++		                 "(frameEndInfo->layers[%u]->views[%u]->next<%s>.%s.imageRect.offset) has negative component(s)",
++		                 layer_index, view_index, extension_name, field_name);
++	}
++
++	if (is_rect_out_of_bounds(&sub_image->imageRect, sc)) {
++		return oxr_error(log, XR_ERROR_SWAPCHAIN_RECT_INVALID,
++		                 "(frameEndInfo->layers[%u]->views[%u]->next<%s>.%s.imageRect) is out of image bounds (%u, %u)",
++		                 layer_index, view_index, extension_name, field_name, sc->width, sc->height);
++	}
++
++	return XR_SUCCESS;
++}
++
++static XrResult
++verify_frame_synthesis_info(struct oxr_logger *log,
++                            uint32_t layer_index,
++                            uint32_t view_index,
++                            const char *extension_name,
++                            uint64_t layer_flags,
++                            uint64_t valid_flags,
++                            const XrSwapchainSubImage *motion_vector_sub_image,
++                            const XrPosef *app_space_delta_pose,
++                            const XrSwapchainSubImage *depth_sub_image,
++                            float min_depth,
++                            float max_depth,
++                            float near_z,
++                            float far_z,
++                            const XrVector4f *motion_vector_scale,
++                            const XrVector4f *motion_vector_offset)
++{
++	XrResult ret = verify_frame_synthesis_sub_image(log, layer_index, view_index, extension_name,
++	                                                "motionVectorSubImage", motion_vector_sub_image);
++	if (ret != XR_SUCCESS) {
++		return ret;
++	}
++
++	ret = verify_frame_synthesis_sub_image(log, layer_index, view_index, extension_name, "depthSubImage",
++	                                       depth_sub_image);
++	if (ret != XR_SUCCESS) {
++		return ret;
++	}
++
++	if (!math_quat_validate_within_1_percent((struct xrt_quat *)&app_space_delta_pose->orientation)) {
++		return oxr_error(log, XR_ERROR_POSE_INVALID,
++		                 "(frameEndInfo->layers[%u]->views[%u]->next<%s>.appSpaceDeltaPose.orientation) is not a valid quat",
++		                 layer_index, view_index, extension_name);
++	}
++
++	if (!math_vec3_validate((struct xrt_vec3 *)&app_space_delta_pose->position)) {
++		return oxr_error(log, XR_ERROR_POSE_INVALID,
++		                 "(frameEndInfo->layers[%u]->views[%u]->next<%s>.appSpaceDeltaPose.position) is not valid",
++		                 layer_index, view_index, extension_name);
++	}
++
++	if ((layer_flags & ~valid_flags) != 0) {
++		return oxr_error(log, XR_ERROR_LAYER_INVALID,
++		                 "(frameEndInfo->layers[%u]->views[%u]->next<%s>.layerFlags == 0x%" PRIx64 ") contains unknown bits",
++		                 layer_index, view_index, extension_name, layer_flags);
++	}
++
++	const float values[] = {min_depth, max_depth, near_z, far_z};
++	for (size_t i = 0; i < ARRAY_SIZE(values); i++) {
++		if (!isfinite(values[i])) {
++			return oxr_error(log, XR_ERROR_LAYER_INVALID,
++			                 "(frameEndInfo->layers[%u]->views[%u]->next<%s>) depth parameters must be finite",
++			                 layer_index, view_index, extension_name);
++		}
++	}
++
++	if (min_depth < 0.0f || min_depth > 1.0f || max_depth < 0.0f || max_depth > 1.0f) {
++		return oxr_error(log, XR_ERROR_LAYER_INVALID,
++		                 "(frameEndInfo->layers[%u]->views[%u]->next<%s>) minDepth and maxDepth must be in [0.0,1.0]",
++		                 layer_index, view_index, extension_name);
++	}
++
++	if (min_depth > max_depth) {
++		return oxr_error(log, XR_ERROR_LAYER_INVALID,
++		                 "(frameEndInfo->layers[%u]->views[%u]->next<%s>.minDepth) %f must be <= maxDepth %f",
++		                 layer_index, view_index, extension_name, min_depth, max_depth);
++	}
++
++	if (near_z == far_z) {
++		return oxr_error(log, XR_ERROR_LAYER_INVALID,
++		                 "(frameEndInfo->layers[%u]->views[%u]->next<%s>.nearZ) must be != farZ",
++		                 layer_index, view_index, extension_name);
++	}
++
++	if (motion_vector_scale != NULL && motion_vector_offset != NULL) {
++		const float vector_values[] = {motion_vector_scale->x, motion_vector_scale->y, motion_vector_scale->z,
++		                              motion_vector_scale->w, motion_vector_offset->x, motion_vector_offset->y,
++		                              motion_vector_offset->z, motion_vector_offset->w};
++		for (size_t i = 0; i < ARRAY_SIZE(vector_values); i++) {
++			if (!isfinite(vector_values[i])) {
++				return oxr_error(log, XR_ERROR_LAYER_INVALID,
++				                 "(frameEndInfo->layers[%u]->views[%u]->next<%s>) motion-vector scale/offset must be finite",
++				                 layer_index, view_index, extension_name);
++			}
++		}
++	}
++
++	return XR_SUCCESS;
++}
++#endif // OXR_HAVE_EXT_frame_synthesis || OXR_HAVE_FB_space_warp
++
+ static XrResult
+ verify_projection_layer(struct oxr_session *sess,
+                         struct xrt_compositor *xc,
+@@ -643,6 +792,9 @@ verify_projection_layer(struct oxr_session *sess,
+ 	// number of depth layers must be 0 or proj->viewCount
+ 	uint32_t depth_layer_count = 0;
+ #endif
++#if defined(OXR_HAVE_EXT_frame_synthesis) || defined(OXR_HAVE_FB_space_warp)
++	uint32_t frame_synthesis_layer_count = 0;
++#endif
+ 
+ 	// Check for valid swapchain states.
+ 	for (uint32_t i = 0; i < proj->viewCount; i++) {
+@@ -722,11 +874,78 @@ verify_projection_layer(struct oxr_session *sess,
+ 			                 view->subImage.imageRect.extent.height, sc->width, sc->height);
+ 		}
+ 
++#if defined(OXR_HAVE_EXT_frame_synthesis) || defined(OXR_HAVE_FB_space_warp)
++		const XrFrameSynthesisInfoEXT *frame_synthesis_info = NULL;
++		const XrCompositionLayerSpaceWarpInfoFB *space_warp_info = NULL;
++#ifdef OXR_HAVE_EXT_frame_synthesis
++		frame_synthesis_info = OXR_GET_INPUT_FROM_CHAIN(
++		    view, XR_TYPE_FRAME_SYNTHESIS_INFO_EXT, XrFrameSynthesisInfoEXT);
++#endif
++#ifdef OXR_HAVE_FB_space_warp
++		space_warp_info = OXR_GET_INPUT_FROM_CHAIN(
++		    view, XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB, XrCompositionLayerSpaceWarpInfoFB);
++#endif
++
++		if (frame_synthesis_info != NULL && space_warp_info != NULL) {
++			return oxr_error(log, XR_ERROR_VALIDATION_FAILURE,
++			                 "(frameEndInfo->layers[%u]->views[%u]) cannot contain both XR_EXT_frame_synthesis and XR_FB_space_warp",
++			                 layer_index, i);
++		}
++
++		if (frame_synthesis_info != NULL) {
++#ifdef OXR_HAVE_EXT_frame_synthesis
++			if (!sess->sys->inst->extensions.EXT_frame_synthesis) {
++				return oxr_error(log, XR_ERROR_FEATURE_UNSUPPORTED,
++				                 "(frameEndInfo->layers[%u]->views[%u]) XR_EXT_frame_synthesis was not enabled",
++				                 layer_index, i);
++			}
++			ret = verify_frame_synthesis_info(
++			    log, layer_index, i, "XrFrameSynthesisInfoEXT", frame_synthesis_info->layerFlags,
++			    XR_FRAME_SYNTHESIS_INFO_USE_2D_MOTION_VECTOR_BIT_EXT |
++			        XR_FRAME_SYNTHESIS_INFO_REQUEST_RELAXED_FRAME_INTERVAL_BIT_EXT,
++			    &frame_synthesis_info->motionVectorSubImage, &frame_synthesis_info->appSpaceDeltaPose,
++			    &frame_synthesis_info->depthSubImage, frame_synthesis_info->minDepth,
++			    frame_synthesis_info->maxDepth, frame_synthesis_info->nearZ, frame_synthesis_info->farZ,
++			    &frame_synthesis_info->motionVectorScale, &frame_synthesis_info->motionVectorOffset);
++			if (ret != XR_SUCCESS) {
++				return ret;
++			}
++			frame_synthesis_layer_count++;
++#endif
++		}
++
++		if (space_warp_info != NULL) {
++#ifdef OXR_HAVE_FB_space_warp
++			if (!sess->sys->inst->extensions.FB_space_warp) {
++				return oxr_error(log, XR_ERROR_FEATURE_UNSUPPORTED,
++				                 "(frameEndInfo->layers[%u]->views[%u]) XR_FB_space_warp was not enabled",
++				                 layer_index, i);
++			}
++			ret = verify_frame_synthesis_info(
++			    log, layer_index, i, "XrCompositionLayerSpaceWarpInfoFB", space_warp_info->layerFlags,
++			    XR_COMPOSITION_LAYER_SPACE_WARP_INFO_FRAME_SKIP_BIT_FB, &space_warp_info->motionVectorSubImage,
++			    &space_warp_info->appSpaceDeltaPose, &space_warp_info->depthSubImage, space_warp_info->minDepth,
++			    space_warp_info->maxDepth, space_warp_info->nearZ, space_warp_info->farZ, NULL, NULL);
++			if (ret != XR_SUCCESS) {
++				return ret;
++			}
++			frame_synthesis_layer_count++;
++#endif
++		}
++#endif // OXR_HAVE_EXT_frame_synthesis || OXR_HAVE_FB_space_warp
++
+ #ifdef OXR_HAVE_KHR_composition_layer_depth
+ 		const XrCompositionLayerDepthInfoKHR *depth_info = OXR_GET_INPUT_FROM_CHAIN(
+ 		    view, XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR, XrCompositionLayerDepthInfoKHR);
+ 
+ 		if (depth_info) {
++#if defined(OXR_HAVE_EXT_frame_synthesis) || defined(OXR_HAVE_FB_space_warp)
++			if (frame_synthesis_info != NULL || space_warp_info != NULL) {
++				return oxr_error(log, XR_ERROR_VALIDATION_FAILURE,
++				                 "(frameEndInfo->layers[%u]->views[%u]) cannot combine KHR depth with frame-synthesis metadata",
++				                 layer_index, i);
++			}
++#endif
+ 			ret = verify_depth_layer(xc, log, layer_index, i, depth_info);
+ 			if (ret != XR_SUCCESS) {
+ 				return ret;
+@@ -734,6 +953,14 @@ verify_projection_layer(struct oxr_session *sess,
+ 			depth_layer_count++;
+ 		}
+ #endif // OXR_HAVE_KHR_composition_layer_depth
+ 	}
++
++#if defined(OXR_HAVE_EXT_frame_synthesis) || defined(OXR_HAVE_FB_space_warp)
++	if (frame_synthesis_layer_count > 0 && frame_synthesis_layer_count != proj->viewCount) {
++		return oxr_error(log, XR_ERROR_VALIDATION_FAILURE,
++		                 "(frameEndInfo->layers[%u]) frame-synthesis metadata must be present for every projection view or none",
++		                 layer_index);
++	}
++#endif
+ 
+ #ifdef OXR_HAVE_KHR_composition_layer_depth
+@@ -1303,6 +1530,12 @@ submit_projection_layer(struct oxr_session *sess,
+ 	struct xrt_pose pose[XRT_MAX_VIEWS] = {0};
+ 	struct xrt_swapchain *swapchains[XRT_MAX_VIEWS] = {0};
+ 
++#if defined(OXR_HAVE_EXT_frame_synthesis) || defined(OXR_HAVE_FB_space_warp)
++	bool frame_synthesis_present = false;
++	struct xrt_swapchain *mv_swapchains[XRT_MAX_VIEWS] = {0};
++	struct xrt_swapchain *frame_synthesis_d_swapchains[XRT_MAX_VIEWS] = {0};
++#endif
++
+ #ifdef OXR_HAVE_KHR_composition_layer_depth
+ 	// Number of depth layers must be 0 or proj->viewCount.
+ 	bool d_scs_valid = true;
+@@ -1343,6 +1576,73 @@ submit_projection_layer(struct oxr_session *sess,
+ 		data.proj.v[i].pose = pose[i];
+ 		fill_in_sub_image(scs[i], &proj->views[i].subImage, &data.proj.v[i].sub);
+ 		swapchains[i] = scs[i]->swapchain;
++
++#if defined(OXR_HAVE_EXT_frame_synthesis) || defined(OXR_HAVE_FB_space_warp)
++		const XrFrameSynthesisInfoEXT *frame_synthesis_info = NULL;
++		const XrCompositionLayerSpaceWarpInfoFB *space_warp_info = NULL;
++#ifdef OXR_HAVE_EXT_frame_synthesis
++		frame_synthesis_info = OXR_GET_INPUT_FROM_CHAIN(
++		    &proj->views[i], XR_TYPE_FRAME_SYNTHESIS_INFO_EXT, XrFrameSynthesisInfoEXT);
++#endif
++#ifdef OXR_HAVE_FB_space_warp
++		space_warp_info = OXR_GET_INPUT_FROM_CHAIN(
++		    &proj->views[i], XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB, XrCompositionLayerSpaceWarpInfoFB);
++#endif
++
++		if (frame_synthesis_info != NULL) {
++			struct oxr_swapchain *mv_sc = XRT_CAST_OXR_HANDLE_TO_PTR(
++			    struct oxr_swapchain *, frame_synthesis_info->motionVectorSubImage.swapchain);
++			struct oxr_swapchain *d_sc = XRT_CAST_OXR_HANDLE_TO_PTR(
++			    struct oxr_swapchain *, frame_synthesis_info->depthSubImage.swapchain);
++			data.proj.v[i].frame_synthesis.valid = true;
++			data.proj.v[i].frame_synthesis.layer_flags = frame_synthesis_info->layerFlags;
++			data.proj.v[i].frame_synthesis.motion_vector_scale[0] = frame_synthesis_info->motionVectorScale.x;
++			data.proj.v[i].frame_synthesis.motion_vector_scale[1] = frame_synthesis_info->motionVectorScale.y;
++			data.proj.v[i].frame_synthesis.motion_vector_scale[2] = frame_synthesis_info->motionVectorScale.z;
++			data.proj.v[i].frame_synthesis.motion_vector_scale[3] = frame_synthesis_info->motionVectorScale.w;
++			data.proj.v[i].frame_synthesis.motion_vector_offset[0] = frame_synthesis_info->motionVectorOffset.x;
++			data.proj.v[i].frame_synthesis.motion_vector_offset[1] = frame_synthesis_info->motionVectorOffset.y;
++			data.proj.v[i].frame_synthesis.motion_vector_offset[2] = frame_synthesis_info->motionVectorOffset.z;
++			data.proj.v[i].frame_synthesis.motion_vector_offset[3] = frame_synthesis_info->motionVectorOffset.w;
++			data.proj.v[i].frame_synthesis.app_space_delta_pose =
++			    *(struct xrt_pose *)&frame_synthesis_info->appSpaceDeltaPose;
++			data.proj.v[i].frame_synthesis.min_depth = frame_synthesis_info->minDepth;
++			data.proj.v[i].frame_synthesis.max_depth = frame_synthesis_info->maxDepth;
++			data.proj.v[i].frame_synthesis.near_z = frame_synthesis_info->nearZ;
++			data.proj.v[i].frame_synthesis.far_z = frame_synthesis_info->farZ;
++			fill_in_sub_image(mv_sc, &frame_synthesis_info->motionVectorSubImage,
++			                  &data.proj.v[i].frame_synthesis.motion_vector);
++			fill_in_sub_image(d_sc, &frame_synthesis_info->depthSubImage,
++			                  &data.proj.v[i].frame_synthesis.depth);
++			mv_swapchains[i] = mv_sc->swapchain;
++			frame_synthesis_d_swapchains[i] = d_sc->swapchain;
++			frame_synthesis_present = true;
++		} else if (space_warp_info != NULL) {
++			struct oxr_swapchain *mv_sc = XRT_CAST_OXR_HANDLE_TO_PTR(
++			    struct oxr_swapchain *, space_warp_info->motionVectorSubImage.swapchain);
++			struct oxr_swapchain *d_sc = XRT_CAST_OXR_HANDLE_TO_PTR(
++			    struct oxr_swapchain *, space_warp_info->depthSubImage.swapchain);
++			data.proj.v[i].frame_synthesis.valid = true;
++			data.proj.v[i].frame_synthesis.layer_flags = space_warp_info->layerFlags;
++			data.proj.v[i].frame_synthesis.motion_vector_scale[0] = 1.0f;
++			data.proj.v[i].frame_synthesis.motion_vector_scale[1] = 1.0f;
++			data.proj.v[i].frame_synthesis.motion_vector_scale[2] = 1.0f;
++			data.proj.v[i].frame_synthesis.motion_vector_scale[3] = 1.0f;
++			data.proj.v[i].frame_synthesis.app_space_delta_pose =
++			    *(struct xrt_pose *)&space_warp_info->appSpaceDeltaPose;
++			data.proj.v[i].frame_synthesis.min_depth = space_warp_info->minDepth;
++			data.proj.v[i].frame_synthesis.max_depth = space_warp_info->maxDepth;
++			data.proj.v[i].frame_synthesis.near_z = space_warp_info->nearZ;
++			data.proj.v[i].frame_synthesis.far_z = space_warp_info->farZ;
++			fill_in_sub_image(mv_sc, &space_warp_info->motionVectorSubImage,
++			                  &data.proj.v[i].frame_synthesis.motion_vector);
++			fill_in_sub_image(d_sc, &space_warp_info->depthSubImage,
++			                  &data.proj.v[i].frame_synthesis.depth);
++			mv_swapchains[i] = mv_sc->swapchain;
++			frame_synthesis_d_swapchains[i] = d_sc->swapchain;
++			frame_synthesis_present = true;
++		}
++#endif // OXR_HAVE_EXT_frame_synthesis || OXR_HAVE_FB_space_warp
+ 	}
+ 	fill_in_color_scale_bias(sess, (XrCompositionLayerBaseHeader *)proj, &data);
+ 	fill_in_y_flip(sess, (XrCompositionLayerBaseHeader *)proj, &data);
+@@ -1350,6 +1650,9 @@ submit_projection_layer(struct oxr_session *sess,
+ 	fill_in_layer_settings(sess, (XrCompositionLayerBaseHeader *)proj, &data);
+ 
+ #ifdef OXR_HAVE_KHR_composition_layer_depth
++#if defined(OXR_HAVE_EXT_frame_synthesis) || defined(OXR_HAVE_FB_space_warp)
++	if (!frame_synthesis_present) {
++#endif
+ 	for (uint32_t i = 0; i < proj->viewCount; ++i) {
+ 		const XrCompositionLayerDepthInfoKHR *d_info = OXR_GET_INPUT_FROM_CHAIN(
+ 		    &proj->views[i], XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR, XrCompositionLayerDepthInfoKHR);
+@@ -1368,8 +1671,23 @@ submit_projection_layer(struct oxr_session *sess,
+ 		fill_in_sub_image(sc, &d_info->subImage, &data.depth.d[i].sub);
+ 		d_swapchains[i] = sc->swapchain;
+ 	}
++#if defined(OXR_HAVE_EXT_frame_synthesis) || defined(OXR_HAVE_FB_space_warp)
++	}
++#endif
+ #endif // OXR_HAVE_KHR_composition_layer_depth
+ 
++#if defined(OXR_HAVE_EXT_frame_synthesis) || defined(OXR_HAVE_FB_space_warp)
++	if (frame_synthesis_present) {
++		xrt_result_t xret = xrt_comp_layer_projection_frame_synthesis( //
++		    xc,                           // compositor
++		    head,                         // xdev
++		    swapchains,                   // color swapchains
++		    mv_swapchains,                // motion-vector swapchains
++		    frame_synthesis_d_swapchains, // depth swapchains
++		    &data);                       // data
++		OXR_CHECK_XRET(log, sess, xret, xrt_comp_layer_projection_frame_synthesis);
++	} else
++#endif
+ 	if (d_scs_valid) {
+ #ifdef OXR_HAVE_KHR_composition_layer_depth
+ 		fill_in_depth_test(sess, (XrCompositionLayerBaseHeader *)proj, &data);
+diff --git a/src/xrt/state_trackers/oxr/oxr_system.c b/src/xrt/state_trackers/oxr/oxr_system.c
+index 1d86f6553..a26449738 100644
+--- a/src/xrt/state_trackers/oxr/oxr_system.c
++++ b/src/xrt/state_trackers/oxr/oxr_system.c
+@@ -173,6 +173,15 @@ view_configuration_view_fill_in(XrViewConfigurationView *target_view, XrViewConf
+ 	target_view->recommendedSwapchainSampleCount = source_view->recommendedSwapchainSampleCount;
+ 	target_view->maxSwapchainSampleCount         = source_view->maxSwapchainSampleCount;
+ 	// clang-format on
++
++#ifdef OXR_HAVE_EXT_frame_synthesis
++	XrFrameSynthesisConfigViewEXT *frame_synthesis_view = OXR_GET_OUTPUT_FROM_CHAIN(
++	    target_view, XR_TYPE_FRAME_SYNTHESIS_CONFIG_VIEW_EXT, XrFrameSynthesisConfigViewEXT);
++	if (frame_synthesis_view != NULL) {
++		frame_synthesis_view->recommendedMotionVectorImageRectWidth = source_view->recommendedImageRectWidth;
++		frame_synthesis_view->recommendedMotionVectorImageRectHeight = source_view->recommendedImageRectHeight;
++	}
++#endif // OXR_HAVE_EXT_frame_synthesis
+ }
+ 
+ 
+@@ -621,6 +630,28 @@ oxr_system_get_properties(struct oxr_logger *log, struct oxr_system *sys, XrSyst
+ 	}
+ #endif
+ 
++#ifdef OXR_HAVE_FB_space_warp
++	XrSystemSpaceWarpPropertiesFB *space_warp_props = NULL;
++	if (sys->inst->extensions.FB_space_warp) {
++		space_warp_props = OXR_GET_OUTPUT_FROM_CHAIN(
++		    properties, XR_TYPE_SYSTEM_SPACE_WARP_PROPERTIES_FB, XrSystemSpaceWarpPropertiesFB);
++	}
++
++	if (space_warp_props != NULL) {
++		struct oxr_view_config_properties *view_props =
++		    get_view_config_properties(sys, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO);
++		if (view_props == NULL) {
++			view_props = get_view_config_properties(sys, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_MONO);
++		}
++		if (view_props != NULL && view_props->view_count > 0) {
++			space_warp_props->recommendedMotionVectorImageRectWidth =
++			    view_props->views[0].recommendedImageRectWidth;
++			space_warp_props->recommendedMotionVectorImageRectHeight =
++			    view_props->views[0].recommendedImageRectHeight;
++		}
++	}
++#endif // OXR_HAVE_FB_space_warp
++
+ #ifdef OXR_HAVE_ANDROID_face_tracking
+ 	XrSystemFaceTrackingPropertiesANDROID *android_face_tracking_props = NULL;
+ 	if (sys->inst->extensions.ANDROID_face_tracking) {
+-- 
+2.55.0

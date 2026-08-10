@@ -53,6 +53,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cinttypes>
 #include <magic_enum.hpp>
 #include <multi/comp_multi_interface.h>
 #include <stdexcept>
@@ -79,6 +80,18 @@ bool is_forced_extension(const char * ext_name)
 	return strstr(val, ext_name);
 }
 
+static std::unique_ptr<audio_device>
+create_audio_device(const from_headset::headset_info_packet & info, wivrn_session & session)
+{
+	return audio_device::create(
+	        "wivrn.source",
+	        "WiVRn(microphone)",
+	        "wivrn.sink",
+	        "WiVRn",
+	        info,
+	        session);
+}
+
 wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection, b_system & system) :
         xrt_system_devices{
                 .get_roles = method_pointer<&wivrn_session::get_roles>,
@@ -101,13 +114,7 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 {
 	try
 	{
-		audio_handle = audio_device::create(
-		        "wivrn.source",
-		        "WiVRn(microphone)",
-		        "wivrn.sink",
-		        "WiVRn",
-		        get_info(),
-		        *this);
+		audio_handle = create_audio_device(get_info(), *this);
 	}
 	catch (const std::exception & e)
 	{
@@ -361,8 +368,11 @@ void wivrn_session::start(ipc_server * server)
 {
 	assert(not net_thread.joinable());
 	mnd_ipc_server = server;
-	net_thread = std::jthread([this](auto stop_token) { return run_net(stop_token); });
 	resume_session();
+	transition(server_connection_state::handshaking);
+	transition(server_connection_state::streaming);
+	send_to_main(from_monado::headset_connected{});
+	net_thread = std::jthread([this](auto stop_token) { return run_net(stop_token); });
 }
 
 void wivrn_session::stop()
@@ -374,6 +384,7 @@ void wivrn_session::stop()
 bool wivrn_session::request_stop()
 {
 	assert(mnd_ipc_server);
+	transition(server_connection_state::stopping, connection_close_reason::server_shutdown);
 	bool b = net_thread.request_stop();
 	worker_thread.request_stop();
 	ipc_server_stop(mnd_ipc_server);
@@ -383,6 +394,8 @@ bool wivrn_session::request_stop()
 void wivrn_session::pause_session()
 {
 	assert(mnd_ipc_server);
+	if (session_paused.exchange(true))
+		return;
 
 	// notify clients about session pause
 
@@ -401,9 +414,12 @@ void wivrn_session::pause_session()
 	offset_est.reset();
 
 	if (audio_handle)
+	{
 		audio_handle->pause();
+		audio_needs_recreate = true;
+	}
 
-	// FIXME: pause compositor
+	compositor.pause();
 
 	// Rotate this connection's trace before it pauses for reconnect.
 	wivrn::trace::flush_session();
@@ -412,9 +428,17 @@ void wivrn_session::pause_session()
 void wivrn_session::resume_session()
 {
 	assert(mnd_ipc_server);
+	if (!session_paused.exchange(false))
+		return;
 
 	// reset session components and send descriptor packets to headset
 
+	if (audio_needs_recreate)
+	{
+		audio_handle.reset();
+		audio_handle = create_audio_device(get_info(), *this);
+		audio_needs_recreate = false;
+	}
 	if (audio_handle)
 		audio_handle->resume();
 
@@ -455,10 +479,68 @@ void wivrn_session::resume_session()
 	        .variant = get_info().variant,
 	});
 
-	// resume session and notify clients
+	// Let applications render the first post-resume IDR without granting focus.
+	// The headset confirms successful stereo decode with stream_ready.
 
 	worker_thread = std::jthread([this](std::stop_token stop) { return run_worker(stop); });
-	update_client_states(true, true);
+	update_client_states(true, false);
+}
+
+void wivrn_session::transition(server_connection_state state, connection_close_reason reason)
+{
+	lifecycle.set_discarded_packets(connection->get_discarded_packets());
+	auto event = lifecycle.transition(state, reason);
+	if (!event)
+		return;
+
+	U_LOG_I("Connection state=%s reason=%s generation=%" PRIu64 " previous_duration_ms=%" PRIu64,
+	        to_string(event->state).data(),
+	        to_string(event->reason).data(),
+	        event->generation,
+	        event->previous_state_duration_ms);
+	send_to_main(from_monado::connection_state_changed{
+	        .state = event->state,
+	        .reason = event->reason,
+	        .generation = connection->get_generation(),
+	        .previous_state_duration_ms = event->previous_state_duration_ms,
+	        .counters = event->counters,
+	});
+
+	if (connection->is_active())
+	{
+		try
+		{
+			send_control(to_headset::connection_state{
+			        .state = event->state,
+			        .reason = event->reason,
+			        .connection_generation = connection->get_generation(),
+			});
+		}
+		catch (const std::exception & e)
+		{
+			U_LOG_D("Unable to send connection state: %s", e.what());
+		}
+	}
+}
+
+bool wivrn_session::accept_packet_generation(uint64_t generation)
+{
+	if (generation == connection->get_generation())
+		return true;
+	connection->discard_packet();
+	return false;
+}
+
+void wivrn_session::report_counters()
+{
+	const auto discarded = connection->get_discarded_packets();
+	if (discarded == reported_discarded_packets)
+		return;
+	reported_discarded_packets = discarded;
+	lifecycle.set_discarded_packets(discarded);
+	send_to_main(from_monado::connection_counters_changed{
+	        .counters = lifecycle.snapshot().counters,
+	});
 }
 
 clock_offset wivrn_session::get_offset()
@@ -492,6 +574,48 @@ void wivrn_session::add_tracking_request(device_id device, int64_t at_ns, int64_
 void wivrn_session::operator()(from_headset::headset_info_packet &&)
 {
 	U_LOG_W("unexpected headset info packet, ignoring");
+}
+
+void wivrn_session::operator()(from_headset::disconnect_request && request)
+{
+	const auto mode = resolve(request.mode, configuration().disconnect_policy_setting);
+	U_LOG_I("Headset requested a clean disconnect (mode=%s)", to_string(mode).data());
+	send_control(to_headset::disconnect_ack{.mode = mode});
+	requested_disconnect = mode;
+	connection->shutdown();
+}
+
+void wivrn_session::operator()(from_headset::disconnect_ack && ack)
+{
+	if (!pending_server_disconnect)
+		return;
+	requested_disconnect = resolve(ack.mode, configuration().disconnect_policy_setting);
+	pending_server_disconnect.reset();
+	connection->shutdown();
+}
+
+void wivrn_session::operator()(from_headset::heartbeat && heartbeat)
+{
+	if (heartbeat.connection_generation != connection->get_generation())
+	{
+		connection->discard_packet();
+		return;
+	}
+	if (heartbeat.stream_channel)
+		last_stream_heartbeat = std::chrono::steady_clock::now();
+	else
+		last_control_heartbeat = std::chrono::steady_clock::now();
+}
+
+void wivrn_session::operator()(from_headset::stream_ready && ready)
+{
+	if (ready.connection_generation != connection->get_generation())
+	{
+		connection->discard_packet();
+		return;
+	}
+	if (!session_paused.load())
+		update_client_states(true, true);
 }
 
 void wivrn_session::operator()(const from_headset::settings_changed & settings)
@@ -569,6 +693,8 @@ static xrt_device_name get_name(interaction_profile profile)
 
 void wivrn_session::operator()(const from_headset::tracking & tracking)
 {
+	if (!accept_packet_generation(tracking.connection_generation))
+		return;
 	if (gamepad_device)
 	{
 		gamepad_connected = tracking.interaction_profiles[2] != interaction_profile::none;
@@ -676,12 +802,16 @@ void wivrn_session::operator()(from_headset::override_foveation_center && foveat
 
 void wivrn_session::operator()(from_headset::derived_pose && derived)
 {
+	if (!accept_packet_generation(derived.connection_generation))
+		return;
 	left_controller.set_derived_pose(derived);
 	right_controller.set_derived_pose(derived);
 }
 
 void wivrn_session::operator()(from_headset::hand_tracking && hand_tracking)
 {
+	if (!accept_packet_generation(hand_tracking.connection_generation))
+		return;
 	auto offset = offset_est.get_offset();
 
 	left_controller.update_hand_tracking(hand_tracking, offset);
@@ -690,6 +820,8 @@ void wivrn_session::operator()(from_headset::hand_tracking && hand_tracking)
 
 void wivrn_session::operator()(from_headset::meta_body && body_tracking)
 {
+	if (!accept_packet_generation(body_tracking.connection_generation))
+		return;
 	assert(body_tracker);
 
 	auto offset = offset_est.get_offset();
@@ -703,6 +835,8 @@ void wivrn_session::operator()(from_headset::meta_body_skeleton && body_skeleton
 }
 void wivrn_session::operator()(from_headset::bd_body && body_tracking)
 {
+	if (!accept_packet_generation(body_tracking.connection_generation))
+		return;
 	assert(body_tracker);
 
 	auto offset = offset_est.get_offset();
@@ -710,6 +844,8 @@ void wivrn_session::operator()(from_headset::bd_body && body_tracking)
 }
 void wivrn_session::operator()(from_headset::htc_body && body_tracking)
 {
+	if (!accept_packet_generation(body_tracking.connection_generation))
+		return;
 	auto offset = offset_est.get_offset();
 
 	for (auto [tracker, pose]: std::ranges::zip_view(generic_trackers, body_tracking.poses))
@@ -726,6 +862,8 @@ void wivrn_session::operator()(from_headset::htc_body && body_tracking)
 }
 void wivrn_session::operator()(from_headset::inputs && inputs)
 {
+	if (!accept_packet_generation(inputs.connection_generation))
+		return;
 	auto offset = get_offset();
 
 	if (roles.left == left_hand_interaction_index)
@@ -780,11 +918,15 @@ void wivrn_session::operator()(from_headset::hid::input && e)
 
 void wivrn_session::operator()(from_headset::timesync_response && timesync)
 {
+	if (!accept_packet_generation(timesync.connection_generation))
+		return;
 	offset_est.add_sample(timesync);
 }
 
 void wivrn_session::operator()(from_headset::feedback && feedback)
 {
+	if (!accept_packet_generation(feedback.connection_generation))
+		return;
 	clock_offset o = offset_est.get_offset();
 	if (not o)
 		return;
@@ -806,6 +948,8 @@ void wivrn_session::operator()(from_headset::feedback && feedback)
 
 void wivrn_session::operator()(from_headset::battery && battery)
 {
+	if (!accept_packet_generation(battery.connection_generation))
+		return;
 	hmd.update_battery(battery);
 }
 
@@ -994,6 +1138,8 @@ void wivrn_session::operator()(const from_headset::stop_application & req)
 
 void wivrn_session::operator()(audio_data && data)
 {
+	if (!accept_packet_generation(data.connection_generation))
+		return;
 	if (audio_handle)
 		audio_handle->process_mic_data(std::move(data));
 }
@@ -1003,10 +1149,15 @@ void wivrn_session::operator()(to_monado::stop &&)
 	request_stop();
 }
 
-void wivrn_session::operator()(to_monado::disconnect &&)
+void wivrn_session::operator()(to_monado::disconnect && request)
 {
-	connection->shutdown();
-	throw std::runtime_error("Disconnecting as requested by main loop");
+	const auto mode = resolve(request.mode, configuration().disconnect_policy_setting);
+	pending_server_disconnect = mode;
+	pending_disconnect_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+	send_control(to_headset::disconnect_request{
+	        .mode = mode,
+	        .reason = connection_close_reason::user_requested,
+	});
 }
 
 void wivrn_session::operator()(to_monado::set_bitrate && data)
@@ -1074,36 +1225,131 @@ struct refresh_rate_adjuster
 
 void wivrn_session::run_net(std::stop_token stop)
 {
+	last_control_heartbeat = std::chrono::steady_clock::now();
+	last_stream_heartbeat = last_control_heartbeat;
+	auto next_heartbeat = last_control_heartbeat;
+	static constexpr auto heartbeat_period = std::chrono::seconds(1);
+	static constexpr auto heartbeat_timeout = std::chrono::seconds(4);
 	while (not stop.stop_requested())
 	{
+		connection_close_reason loss_reason = connection_close_reason::none;
 		try
 		{
 			connection->poll(*this, 20);
+			const auto now = std::chrono::steady_clock::now();
+			if (now >= next_heartbeat)
+			{
+				report_counters();
+				const auto sequence = ++heartbeat_sequence;
+				send_control(to_headset::heartbeat{
+				        .connection_generation = connection->get_generation(),
+				        .sequence = sequence,
+				        .stream_channel = false,
+				});
+				if (connection->has_stream())
+				{
+					send_stream(to_headset::heartbeat{
+					        .connection_generation = connection->get_generation(),
+					        .sequence = sequence,
+					        .stream_channel = true,
+					});
+				}
+				next_heartbeat = now + heartbeat_period;
+			}
+
+			if (now - last_control_heartbeat > heartbeat_timeout ||
+			    (connection->has_stream() && now - last_stream_heartbeat > heartbeat_timeout))
+			{
+				loss_reason = connection_close_reason::network_timeout;
+				connection->shutdown();
+			}
+
+			if (pending_server_disconnect && std::chrono::steady_clock::now() >= pending_disconnect_deadline)
+			{
+				requested_disconnect = *pending_server_disconnect;
+				pending_server_disconnect.reset();
+				connection->shutdown();
+			}
 
 			if (uinput_handler)
 			{
 				for (auto & haptics: uinput_handler->read_rumble())
 					send_stream(std::move(haptics));
 			}
+
+			if (!requested_disconnect && loss_reason == connection_close_reason::none)
+				continue;
+			if (requested_disconnect)
+				loss_reason = connection_close_reason::user_requested;
+		}
+		catch (const socket_shutdown &)
+		{
+			loss_reason = pending_server_disconnect ? connection_close_reason::user_requested : connection_close_reason::peer_closed;
 		}
 		catch (const std::exception & e)
 		{
-			U_LOG_W("Exception in network thread: %s, Session paused.", e.what());
-			pause_session();
+			U_LOG_W("Streaming transport closed: %s", e.what());
+			loss_reason = pending_server_disconnect ? connection_close_reason::user_requested : connection_close_reason::transport_error;
+		}
 
-			reconnect(stop);
-			if (stop.stop_requested())
-				break;
+		if (pending_server_disconnect)
+		{
+			requested_disconnect = *pending_server_disconnect;
+			pending_server_disconnect.reset();
+		}
 
-			try
+		connection->shutdown();
+		pause_session();
+		send_to_main(from_monado::headset_disconnected{});
+
+		const bool voluntary = loss_reason == connection_close_reason::user_requested;
+		const auto mode = voluntary
+		                          ? resolve(requested_disconnect.value_or(disconnect_mode::default_mode), configuration().disconnect_policy_setting)
+		                          : disconnect_mode::pause;
+		requested_disconnect.reset();
+
+		if (mode == disconnect_mode::terminate)
+		{
+			transition(server_connection_state::stopping, connection_close_reason::user_requested);
+			request_stop();
+			break;
+		}
+
+		std::optional<std::chrono::steady_clock::time_point> deadline;
+		if (voluntary)
+			transition(server_connection_state::paused, loss_reason);
+		else
+		{
+			transition(server_connection_state::reconnecting, loss_reason);
+			deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+		}
+
+		if (!reconnect(stop, deadline))
+		{
+			if (!stop.stop_requested())
 			{
-				resume_session();
-				U_LOG_I("Headset connected, Session resumed.");
+				transition(server_connection_state::failed, connection_close_reason::network_timeout);
+				request_stop();
 			}
-			catch (const std::exception & e)
-			{
-				U_LOG_E("Exception on session resume: %s", e.what());
-			}
+			break;
+		}
+
+		try
+		{
+			resume_session();
+			transition(server_connection_state::streaming);
+			send_to_main(from_monado::headset_connected{});
+			last_control_heartbeat = std::chrono::steady_clock::now();
+			last_stream_heartbeat = last_control_heartbeat;
+			next_heartbeat = last_control_heartbeat;
+			U_LOG_I("Headset reconnected; session resumed");
+		}
+		catch (const std::exception & e)
+		{
+			U_LOG_E("Session resume failed: %s", e.what());
+			transition(server_connection_state::failed, connection_close_reason::protocol_error);
+			request_stop();
+			break;
 		}
 	}
 }
@@ -1207,17 +1453,17 @@ std::pair<bool, std::optional<std::string>> wivrn_session::validate_headset_info
 
 	// stream settings
 	{
-		warn |= prev_info.render_eye_width != info.render_eye_width;
-		warn |= prev_info.render_eye_height != info.render_eye_height;
-		warn |= prev_info.stream_eye_width != info.stream_eye_width;
-		warn |= prev_info.stream_eye_height != info.stream_eye_height;
+		refuse |= prev_info.render_eye_width != info.render_eye_width;
+		refuse |= prev_info.render_eye_height != info.render_eye_height;
+		refuse |= prev_info.stream_eye_width != info.stream_eye_width;
+		refuse |= prev_info.stream_eye_height != info.stream_eye_height;
 
 		refuse |= prev_info.supported_codecs != info.supported_codecs;
 		refuse |= prev_info.bit_depth != info.bit_depth;
 
 		if (refuse)
 		{
-			return std::make_pair(false, "video codec mismatch.");
+			return std::make_pair(false, "video codec, bit depth, or resolution mismatch.");
 		}
 	}
 
@@ -1236,12 +1482,10 @@ std::pair<bool, std::optional<std::string>> wivrn_session::validate_headset_info
 
 	// headset features
 	{
-		// allow toggling some features but changes won't be visible to applications
-		warn |= prev_info.hand_tracking != info.hand_tracking;
-		warn |= prev_info.face_tracking != info.face_tracking;
-		warn |= prev_info.eye_gaze != info.eye_gaze;
-
-		warn |= prev_info.num_generic_trackers != info.num_generic_trackers;
+		refuse |= prev_info.hand_tracking != info.hand_tracking;
+		refuse |= prev_info.face_tracking != info.face_tracking;
+		refuse |= prev_info.eye_gaze != info.eye_gaze;
+		refuse |= prev_info.num_generic_trackers != info.num_generic_trackers;
 
 		// only allow connecting from the "same" headset
 		refuse |= prev_info.system_name != info.system_name;
@@ -1270,27 +1514,31 @@ std::pair<bool, std::optional<std::string>> wivrn_session::validate_headset_info
 	return std::make_pair(warn, std::nullopt);
 }
 
-void wivrn_session::reconnect(std::stop_token stop)
+bool wivrn_session::reconnect(std::stop_token stop, std::optional<std::chrono::steady_clock::time_point> deadline)
 {
 	assert(mnd_ipc_server);
-	U_LOG_I("Waiting for new connection");
+	U_LOG_I("Waiting for headset reconnection%s", deadline ? " (30 second deadline)" : "");
 
 	while (not stop.stop_requested())
 	{
+		if (deadline && std::chrono::steady_clock::now() >= *deadline)
+			return false;
 		try
 		{
 			// await a new headset connection
 
-			auto tcp = accept_connection(*this, stop, &wivrn_session::quit_if_no_client);
+			auto tcp = accept_connection(*this, stop, &wivrn_session::quit_if_no_client, deadline);
 			if (stop.stop_requested())
-				return;
+				return false;
 			if (not tcp)
-			{
-				request_stop();
-				return;
-			}
+				return false;
 
-			connection->reset(stop, std::move(*tcp), [this]() { quit_if_no_client(); });
+			transition(server_connection_state::handshaking);
+			connection->reset(stop, std::move(*tcp), [this, deadline]() {
+				quit_if_no_client();
+				if (deadline && std::chrono::steady_clock::now() >= *deadline)
+					throw std::runtime_error("Reconnect deadline expired during handshake");
+			});
 
 			// validate if headset is compatible with the current session
 
@@ -1307,7 +1555,7 @@ void wivrn_session::reconnect(std::stop_token stop)
 				});
 
 				connection->shutdown();
-				throw std::runtime_error("headset config incompatible with current session");
+				throw incompatible_resume{};
 			}
 
 			if (warn_conn)
@@ -1329,13 +1577,22 @@ void wivrn_session::reconnect(std::stop_token stop)
 			headset_info.country = info.country;
 			headset_info.variant = info.variant;
 
-			break;
+			return true;
+		}
+		catch (const incompatible_resume & e)
+		{
+			U_LOG_W("Rejected reconnect: %s", e.what());
+			transition(deadline ? server_connection_state::reconnecting : server_connection_state::paused,
+			           connection_close_reason::incompatible_resume);
 		}
 		catch (std::exception & e)
 		{
-			U_LOG_W("Exception while connecting headset: %s", e.what());
+			U_LOG_W("Reconnect attempt failed: %s", e.what());
+			transition(deadline ? server_connection_state::reconnecting : server_connection_state::paused,
+			           connection_close_reason::transport_error);
 		}
 	}
+	return false;
 }
 
 void wivrn_session::update_client_states(bool visible, bool focused)

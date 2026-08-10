@@ -209,6 +209,14 @@ public:
 	void set_focused(bool status);
 	virtual void render(const XrFrameState &) = 0;
 	virtual void on_xr_event(const xr::event &);
+	virtual bool allow_transient_frame_wait_failure() const
+	{
+		return false;
+	}
+	virtual bool connection_recovered_while_frame_wait_failed() const
+	{
+		return false;
+	}
 
 	virtual bool on_input_key_down(uint8_t key_code);
 	virtual bool on_input_key_up(uint8_t key_code);

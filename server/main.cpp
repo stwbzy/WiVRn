@@ -208,6 +208,34 @@ const std::chrono::milliseconds default_delay_next_try = 10ms;
 std::chrono::milliseconds delay_next_try = default_delay_next_try;
 
 WivrnServer * dbus_server;
+wivrn::server_connection_state detailed_connection_state = wivrn::server_connection_state::listening;
+wivrn::connection_close_reason detailed_connection_reason = wivrn::connection_close_reason::none;
+uint64_t connection_generation = 0;
+wivrn::connection_counters connection_stats{};
+uint64_t initial_connection_attempts = 0;
+
+void expose_connection_state()
+{
+	if (!dbus_server)
+		return;
+	wivrn_server_set_connection_state(dbus_server, wivrn::to_string(detailed_connection_state).data());
+	wivrn_server_set_connection_reason(dbus_server, wivrn::to_string(detailed_connection_reason).data());
+	wivrn_server_set_connection_generation(dbus_server, connection_generation);
+	wivrn_server_set_connection_attempts(dbus_server, connection_stats.attempts);
+	wivrn_server_set_successful_reconnections(dbus_server, connection_stats.successful_reconnections);
+	wivrn_server_set_reconnection_expirations(dbus_server, connection_stats.reconnection_expirations);
+	wivrn_server_set_discarded_packets(dbus_server, connection_stats.discarded_packets);
+}
+
+void set_connection_state(wivrn::server_connection_state state,
+	                      wivrn::connection_close_reason reason = wivrn::connection_close_reason::none)
+{
+	if (state == detailed_connection_state && reason == detailed_connection_reason)
+		return;
+	detailed_connection_state = state;
+	detailed_connection_reason = reason;
+	expose_connection_state();
+}
 
 /* TODO: Document FSM
  */
@@ -318,6 +346,7 @@ void start_listening()
 	g_source_set_callback(source_listener, G_SOURCE_FUNC(&headset_connected), nullptr, nullptr);
 	listener_watch = g_source_attach(source_listener, nullptr);
 	g_source_unref(source_listener);
+	set_connection_state(server_connection_state::listening);
 }
 
 void stop_listening()
@@ -405,6 +434,7 @@ int sigint(void * sig_nr)
 	std::cerr << strsignal((uintptr_t)sig_nr) << std::endl;
 
 	quitting_main_loop = true;
+	set_connection_state(server_connection_state::stopping, connection_close_reason::server_shutdown);
 
 	update_fsm();
 
@@ -444,6 +474,7 @@ gboolean headset_connected_failed(void *)
 {
 	assert(connection_thread);
 	connection_thread.reset();
+	set_connection_state(server_connection_state::listening, connection_close_reason::protocol_error);
 
 	update_fsm();
 	return G_SOURCE_REMOVE;
@@ -453,6 +484,7 @@ gboolean headset_connected_incorrect_pin(void *)
 {
 	assert(connection_thread);
 	connection_thread.reset();
+	set_connection_state(server_connection_state::listening, connection_close_reason::protocol_error);
 
 	delay_next_try = 2 * delay_next_try;
 	std::cerr << "Waiting " << delay_next_try << " until the next attempt is allowed" << std::endl;
@@ -471,6 +503,10 @@ gboolean headset_connected(gint fd, GIOCondition condition, gpointer user_data)
 	TCP tcp = listener->accept().first;
 	stop_listening();
 	stop_publishing();
+	set_connection_state(server_connection_state::handshaking);
+	++initial_connection_attempts;
+	connection_stats.attempts = initial_connection_attempts;
+	expose_connection_state();
 
 	connection_thread.emplace([](std::stop_token stop_token, TCP && tcp, std::string pin, wivrn_connection::encryption_state enc_state) {
 		try
@@ -502,11 +538,10 @@ gboolean control_received(gint fd, GIOCondition condition, gpointer user_data)
 	if (packet)
 	{
 		std::visit(utils::overloaded{
-		                   [&](const wivrn::from_headset::headset_info_packet & info) {
-			                   on_headset_info_packet(info);
-			                   inhibitor.emplace();
-			                   wivrn_server_set_headset_connected(dbus_server, true);
-		                   },
+			                   [&](const wivrn::from_headset::headset_info_packet & info) {
+				                   on_headset_info_packet(info);
+				                   inhibitor.emplace();
+			                   },
 		                   [&](const wivrn::from_headset::settings_changed & settings) {
 			                   wivrn_server_set_preferred_refresh_rate(dbus_server, settings.preferred_refresh_rate);
 			                   wivrn_server_set_bitrate(dbus_server, settings.bitrate_bps);
@@ -525,17 +560,30 @@ gboolean control_received(gint fd, GIOCondition condition, gpointer user_data)
 				                   }
 			                   }
 		                   },
-		                   [&](const from_monado::headset_connected &) {
-			                   stop_publishing();
-			                   inhibitor.emplace();
-			                   wivrn_server_set_headset_connected(dbus_server, true);
-		                   },
+			                   [&](const from_monado::headset_connected &) {
+				                   stop_publishing();
+				                   inhibitor.emplace();
+				                   wivrn_server_set_headset_connected(dbus_server, true);
+			                   },
 		                   [&](const from_monado::headset_disconnected &) {
 			                   start_publishing();
 			                   inhibitor.reset();
 			                   wivrn_server_set_headset_connected(dbus_server, false);
-			                   wivrn_server_set_client_tab(dbus_server, "");
-		                   },
+				                   wivrn_server_set_client_tab(dbus_server, "");
+			                   },
+			                   [&](const from_monado::connection_state_changed & event) {
+				                   detailed_connection_state = event.state;
+				                   detailed_connection_reason = event.reason;
+				                   connection_generation = event.generation;
+				                   connection_stats = event.counters;
+				                   connection_stats.attempts = initial_connection_attempts + (event.counters.attempts ? event.counters.attempts - 1 : 0);
+				                   expose_connection_state();
+			                   },
+			                   [&](const from_monado::connection_counters_changed & event) {
+				                   connection_stats = event.counters;
+				                   connection_stats.attempts = initial_connection_attempts + (event.counters.attempts ? event.counters.attempts - 1 : 0);
+				                   expose_connection_state();
+			                   },
 		                   [&](const wivrn::from_headset::stream_tab_changed & event) {
 			                   wivrn_server_set_client_tab(dbus_server, magic_enum::enum_name(event.tab).data());
 		                   },
@@ -606,8 +654,37 @@ gboolean on_handle_disconnect(WivrnServer * skeleton,
                               GDBusMethodInvocation * invocation,
                               gpointer user_data)
 {
-	wivrn_ipc_socket_main_loop->send(to_monado::disconnect{});
+	wivrn_ipc_socket_main_loop->send(to_monado::disconnect{.mode = disconnect_mode::default_mode});
 
+	g_dbus_method_invocation_return_value(invocation, nullptr);
+	return G_SOURCE_CONTINUE;
+}
+
+gboolean on_handle_disconnect_with_mode(WivrnServer * skeleton,
+	                                     GDBusMethodInvocation * invocation,
+	                                     gpointer user_data)
+{
+	GVariant * args = g_dbus_method_invocation_get_parameters(invocation);
+	const char * value = nullptr;
+	g_variant_get_child(args, 0, "&s", &value);
+
+	disconnect_mode mode;
+	if (std::string_view(value) == "default")
+		mode = disconnect_mode::default_mode;
+	else if (std::string_view(value) == "pause")
+		mode = disconnect_mode::pause;
+	else if (std::string_view(value) == "terminate")
+		mode = disconnect_mode::terminate;
+	else
+	{
+		g_dbus_method_invocation_return_dbus_error(
+		        invocation,
+		        "io.github.wivrn.Server.InvalidDisconnectMode",
+		        "mode must be default, pause, or terminate");
+		return G_SOURCE_CONTINUE;
+	}
+
+	wivrn_ipc_socket_main_loop->send(to_monado::disconnect{.mode = mode});
 	g_dbus_method_invocation_return_value(invocation, nullptr);
 	return G_SOURCE_CONTINUE;
 }
@@ -836,6 +913,10 @@ void on_name_acquired(GDBusConnection * connection, const gchar * name, gpointer
 	                 "handle-disconnect",
 	                 G_CALLBACK(on_handle_disconnect),
 	                 NULL);
+	g_signal_connect(dbus_server,
+	                 "handle-disconnect-with-mode",
+	                 G_CALLBACK(on_handle_disconnect_with_mode),
+	                 NULL);
 
 	g_signal_connect(dbus_server,
 	                 "handle-quit",
@@ -898,6 +979,7 @@ void on_name_acquired(GDBusConnection * connection, const gchar * name, gpointer
 		set_encryption_state(enc_state);
 
 	wivrn_server_set_client_tab(dbus_server, "");
+	expose_connection_state();
 }
 
 auto create_dbus_connection()

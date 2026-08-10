@@ -321,9 +321,9 @@ void stop_server()
 	call_method(get_user_bus(), "Quit", "");
 }
 
-void disconnect()
+void disconnect(const std::string & mode)
 {
-	call_method(get_user_bus(), "Disconnect", "");
+	call_method(get_user_bus(), "DisconnectWithMode", "s", mode.c_str());
 }
 
 int main(int argc, char ** argv)
@@ -370,8 +370,13 @@ int main(int argc, char ** argv)
 	app.add_subcommand("stop-server", "Stop wivrn-server process")
 	        ->callback(stop_server);
 
-	app.add_subcommand("disconnect", "Disconnect headset")
-	        ->callback(disconnect);
+	std::string disconnect_mode = "default";
+	auto disconnect_command = app.add_subcommand("disconnect", "Disconnect headset")
+	                                  ->callback([&]() { disconnect(disconnect_mode); });
+	disconnect_command->add_option("--mode", disconnect_mode, "Session policy after disconnect")
+	        ->check(CLI::IsMember({"default", "pause", "terminate"}))
+	        ->default_val("default")
+	        ->option_text("default|pause|terminate");
 
 	std::string tab_name;
 	app.add_subcommand("tab", "Show or set current tab on headset")

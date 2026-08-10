@@ -29,10 +29,12 @@
 
 #include <sys/poll.h>
 
-std::unique_ptr<wivrn::TCP> wivrn::accept_connection(wivrn_session & cnx, std::stop_token stop, std::function<void(wivrn_session &)> tick)
+std::unique_ptr<wivrn::TCP> wivrn::accept_connection(
+        wivrn_session & cnx,
+        std::stop_token stop,
+        std::function<void(wivrn_session &)> tick,
+        std::optional<std::chrono::steady_clock::time_point> deadline)
 {
-	wivrn_ipc_socket_monado->send(from_monado::headset_disconnected{});
-
 	wivrn::TCPListener listener(configuration().port);
 
 	pollfd fds[2]{
@@ -42,6 +44,9 @@ std::unique_ptr<wivrn::TCP> wivrn::accept_connection(wivrn_session & cnx, std::s
 
 	while (not stop.stop_requested())
 	{
+		if (deadline && std::chrono::steady_clock::now() >= *deadline)
+			return {};
+
 		if (poll(fds, std::size(fds), 100) < 0)
 		{
 			perror("poll");
@@ -50,7 +55,6 @@ std::unique_ptr<wivrn::TCP> wivrn::accept_connection(wivrn_session & cnx, std::s
 
 		if (fds[0].revents & POLLIN)
 		{
-			wivrn_ipc_socket_monado->send(from_monado::headset_connected{});
 			return std::make_unique<wivrn::TCP>(listener.accept().first);
 		}
 
@@ -63,6 +67,13 @@ std::unique_ptr<wivrn::TCP> wivrn::accept_connection(wivrn_session & cnx, std::s
 					                   // gets handled in wivrn_session::reconnect since we return nullptr
 					                   U_LOG_I("Received stop packet during reconnect, stopping");
 					                   cnx.request_stop();
+				                   },
+				                   [&cnx](to_monado::disconnect request) {
+				                       if (resolve(request.mode, configuration().disconnect_policy_setting) == disconnect_mode::terminate)
+				                       {
+				                               U_LOG_I("Received terminate request while session is paused");
+				                               cnx.request_stop();
+				                       }
 				                   },
 				                   [](auto &&) {
 					                   // Ignore request when no headset is connected

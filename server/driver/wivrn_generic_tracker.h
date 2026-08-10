@@ -22,6 +22,8 @@
 
 #include "history.h"
 
+#include <atomic>
+
 namespace wivrn
 {
 class wivrn_session;
@@ -44,7 +46,7 @@ class wivrn_generic_tracker : public xrt_device
 	xrt_input pose_input;
 
 	wivrn_session & cnx;
-	bool enabled = true;
+	std::atomic_bool enabled = true;
 
 public:
 	using base_t = xrt_device;

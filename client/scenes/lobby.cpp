@@ -876,6 +876,11 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 				current_tab = tab::server_list;
 				break;
 
+			case scenes::stream::state::reconnecting:
+			case scenes::stream::state::disconnecting:
+				current_tab = tab::server_list;
+				break;
+
 			default:
 				break;
 		}
@@ -1098,6 +1103,16 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 #if WIVRN_FEATURE_RENDERDOC
 	renderdoc_end(*vk_instance);
 #endif
+}
+
+bool scenes::lobby::allow_transient_frame_wait_failure() const
+{
+	return next_scene && next_scene->current_state() == stream::state::reconnecting;
+}
+
+bool scenes::lobby::connection_recovered_while_frame_wait_failed() const
+{
+	return next_scene && next_scene->connection_recovered_while_frame_wait_failed();
 }
 
 void scenes::lobby::on_focused()

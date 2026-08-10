@@ -47,6 +47,8 @@ public:
 	{
 		initializing,
 		streaming,
+		reconnecting,
+		disconnecting,
 		stalled,
 		shutdown,
 	};
@@ -75,6 +77,7 @@ private:
 	std::array<std::shared_ptr<wivrn::shard_accumulator::blit_handle>, decoder_count> common_frame(XrTime display_time);
 
 	std::unique_ptr<wivrn_session> network_session;
+	from_headset::headset_info_packet reconnect_info;
 	std::thread network_thread;
 	thread_safe<to_headset::tracking_control> tracking_control{};
 	std::array<std::atomic<interaction_profile>, 3> interaction_profiles; // left hand, right hand, gamepad
@@ -107,14 +110,22 @@ private:
 	std::vector<std::tuple<device_id, XrAction, XrActionType>> input_actions;
 
 	std::atomic<state> state_ = state::initializing;
+	std::atomic<connection_close_reason> reconnect_reason = connection_close_reason::none;
+	std::atomic<int64_t> reconnect_deadline_ns = 0;
+	std::atomic<int64_t> disconnect_deadline_ns = 0;
+	std::atomic<bool> disconnect_ack_received = false;
+	std::atomic<bool> resume_validated = false;
+	std::atomic<bool> resume_rejected = false;
+	std::atomic<int64_t> last_control_heartbeat_ns = 0;
+	std::atomic<int64_t> last_stream_heartbeat_ns = 0;
+	uint64_t heartbeat_sequence = 0; // network thread only
+	client_connection_lifecycle connection_lifecycle;
 
 	void set_state(state new_state)
 	{
-		state prev = state_;
-		if (prev == state::shutdown)
-			return;
-
-		state_.compare_exchange_strong(prev, new_state);
+		state previous = state_.load();
+		while (previous != state::shutdown && !state_.compare_exchange_weak(previous, new_state))
+		{}
 	}
 
 	xr::swapchain swapchain;
@@ -219,6 +230,16 @@ public:
 	void on_focused() override;
 	void on_unfocused() override;
 	void on_xr_event(const xr::event &) override;
+	bool allow_transient_frame_wait_failure() const override
+	{
+		return state_ == state::reconnecting;
+	}
+	bool connection_recovered_while_frame_wait_failed() const override
+	{
+		const auto connection_state = state_.load();
+		return connection_state == state::initializing || connection_state == state::streaming ||
+		       connection_state == state::stalled;
+	}
 
 	bool on_input_key_down(uint8_t key_code) override;
 	bool on_input_key_up(uint8_t key_code) override;
@@ -231,6 +252,10 @@ public:
 	void operator()(to_headset::pin_check_2 &&) {};
 	void operator()(to_headset::pin_check_4 &&) {};
 	void operator()(to_headset::handshake &&) {};
+	void operator()(to_headset::disconnect_request &&);
+	void operator()(to_headset::disconnect_ack &&);
+	void operator()(to_headset::connection_state &&);
+	void operator()(to_headset::heartbeat &&);
 	void operator()(to_headset::server_message &&);
 	void operator()(to_headset::video_stream_data_shard &&);
 	void operator()(to_headset::haptics &&);
@@ -263,6 +288,9 @@ public:
 	}
 
 	void exit();
+	void request_disconnect(disconnect_mode mode = disconnect_mode::default_mode);
+	uint32_t reconnect_remaining_seconds() const;
+	connection_close_reason reconnect_close_reason() const { return reconnect_reason.load(); }
 	void start_application(std::string appid);
 
 	static meta & get_meta_scene();
@@ -270,6 +298,8 @@ public:
 
 private:
 	void process_packets();
+	void reset_stream_resources();
+	void transition_connection(client_connection_state, connection_close_reason = connection_close_reason::none);
 	void tracking();
 	void read_actions();
 

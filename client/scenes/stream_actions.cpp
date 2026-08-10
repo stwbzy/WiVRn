@@ -74,6 +74,11 @@ void scenes::stream::read_actions()
 
 void scenes::stream::operator()(to_headset::haptics && haptics)
 {
+	if (haptics.connection_generation != network_session->generation())
+	{
+		network_session->discard_packet();
+		return;
+	}
 	auto range = haptics_actions.equal_range(haptics.id);
 	for (auto it = range.first; it != range.second; ++it)
 	{

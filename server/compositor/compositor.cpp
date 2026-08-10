@@ -63,6 +63,7 @@ static auto renderdoc()
 #endif
 
 DEBUG_GET_ONCE_LOG_OPTION(log, "XRT_COMPOSITOR_LOG", U_LOGGING_INFO)
+DEBUG_GET_ONCE_BOOL_OPTION(fsr_frame_generation, "WIVRN_FSR_FRAME_GENERATION", false)
 
 namespace details
 {
@@ -233,6 +234,7 @@ xrt_result_t compositor::predict_frame(int64_t * out_frame_id,
                                        int64_t * out_predicted_display_time_ns,
                                        int64_t * out_predicted_display_period_ns)
 {
+	std::lock_guard frame_lock(frame_mutex);
 	int64_t frame_id = -1;
 	int64_t wake_up_time_ns = 0;
 	int64_t present_slop_ns = 0;
@@ -273,12 +275,85 @@ xrt_result_t compositor::mark_frame(int64_t frame_id,
 	return XRT_ERROR_VULKAN;
 }
 
+void compositor::inspect_frame_generation_inputs()
+{
+	if (!frame_generation_probe.requested)
+		return;
+
+	uint32_t projection_layers = 0;
+	uint32_t depth_layers = 0;
+	uint32_t depth_views = 0;
+	uint32_t synthesis_layers = 0;
+	uint32_t synthesis_depth_views = 0;
+	uint32_t motion_vector_views = 0;
+
+	for (uint32_t layer_index = 0; layer_index < layer_accum.layer_count; ++layer_index)
+	{
+		const auto & layer = layer_accum.layers[layer_index];
+		if (layer.data.type == XRT_LAYER_PROJECTION)
+		{
+			projection_layers++;
+			bool has_synthesis = false;
+			for (uint32_t view = 0; view < layer.data.view_count; ++view)
+			{
+				const auto & synthesis = layer.data.proj.v[view].frame_synthesis;
+				if (synthesis.valid)
+				{
+					has_synthesis = true;
+					motion_vector_views++;
+					if (synthesis.depth.rect.extent.w > 0 && synthesis.depth.rect.extent.h > 0)
+						synthesis_depth_views++;
+				}
+			}
+			if (has_synthesis)
+				synthesis_layers++;
+		}
+		else if (layer.data.type == XRT_LAYER_PROJECTION_DEPTH)
+		{
+			depth_layers++;
+			depth_views += layer.data.view_count;
+		}
+	}
+
+	frame_generation_probe.frames++;
+	const bool standard_depth_ready = depth_layers > 0 && depth_views > 0;
+	const bool inputs_ready = synthesis_layers > 0 && motion_vector_views == synthesis_depth_views &&
+	                          synthesis_depth_views > 0;
+	if (!frame_generation_probe.reported || inputs_ready != frame_generation_probe.last_inputs_ready)
+	{
+		U_LOG_I("FSR frame-generation compositor probe: requested=%u frame=%" PRIu64
+		        " layers=%u projection_layers=%u depth_layers=%u depth_views=%u synthesis_layers=%u"
+		        " synthesis_depth_views=%u motion_vector_views=%u standard_depth_ready=%u inputs_ready=%u"
+		        " backend=none fallback=normal-composition",
+		        frame_generation_probe.requested,
+		        frame_generation_probe.frames,
+		        layer_accum.layer_count,
+		        projection_layers,
+		        depth_layers,
+		        depth_views,
+		        synthesis_layers,
+		        synthesis_depth_views,
+		        motion_vector_views,
+		        standard_depth_ready,
+		        inputs_ready);
+		frame_generation_probe.reported = true;
+		frame_generation_probe.last_inputs_ready = inputs_ready;
+	}
+}
+
 xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 {
 	u_graphics_sync_unref(&sync_handle);
+	std::lock_guard frame_lock(frame_mutex);
 
 	// Move waited frame to rendering frame, clear waited.
 	comp_frame_move_and_clear_locked(&frame.rendering, &frame.waited);
+	if (paused.load())
+	{
+		comp_frame_clear_locked(&frame.rendering);
+		return XRT_SUCCESS;
+	}
+	inspect_frame_generation_inputs();
 
 	U_LOG_IFL_D(log_level, "frame %ld commit %d layers", frame.rendering.id, layer_accum.layer_count);
 
@@ -624,6 +699,16 @@ void compositor::encoder_work(std::stop_token tok)
 
 		assert(req < images.size());
 		auto & image = images[req];
+		if (paused.load())
+		{
+			for (auto & encoder: encoders)
+			{
+				if (encoder->stream_idx < 2 || image.view_info.alpha)
+					encoder->discard_frame();
+			}
+			image.busy = false;
+			continue;
+		}
 
 		wivrn::trace::scope trace_iter(wivrn::trace::cpu_track::compositor, 0, image.frame_index, "encoder_work iter");
 
@@ -694,6 +779,12 @@ compositor::compositor(wivrn_session & session) :
         squasher(vk, render_extent(session.get_info())),
         foveation(vk, images[0].image.info().extent)
 {
+	frame_generation_probe.requested = debug_get_bool_option_fsr_frame_generation();
+	if (frame_generation_probe.requested)
+	{
+		U_LOG_I("FSR frame-generation compositor probe enabled: metadata-only, normal composition retained");
+	}
+
 	comp_base * c_base = this;
 	// Ensure we can safely cast pointers
 	assert(intptr_t(&base) == intptr_t(this));
@@ -822,9 +913,46 @@ void compositor::update_foveation_center_override(const from_headset::override_f
 
 void compositor::resume()
 {
+	std::lock_guard frame_lock(frame_mutex);
+	if (!paused.load())
+	{
+		// The first session start also needs descriptors and an IDR.
+		for (auto & encoder: encoders)
+			encoder->reset();
+		send_video_stream_description();
+		return;
+	}
+
 	for (auto & encoder: encoders)
 		encoder->reset();
+	pacer.reset();
+	frame_generation_probe.frames = 0;
+	frame_generation_probe.reported = false;
 	send_video_stream_description();
+	paused = false;
+}
+
+void compositor::pause()
+{
+	if (paused.exchange(true))
+		return;
+	std::lock_guard frame_lock(frame_mutex);
+
+	if (auto request = encode_request.exchange(-1); request >= 0)
+	{
+		for (auto & encoder: encoders)
+		{
+			if (encoder->stream_idx < 2 || images[request].view_info.alpha)
+				encoder->discard_frame();
+		}
+		images[request].busy = false;
+	}
+	encode_request.notify_all();
+	comp_frame_clear_locked(&frame.waited);
+	comp_frame_clear_locked(&frame.rendering);
+	pacer.reset();
+	frame_generation_probe.frames = 0;
+	frame_generation_probe.reported = false;
 }
 
 void compositor::on_feedback(const from_headset::feedback & feedback, const clock_offset & o)

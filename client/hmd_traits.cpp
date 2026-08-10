@@ -162,6 +162,7 @@ void hmd_traits::init()
 	{
 		permissions[feature::eye_gaze] = "com.oculus.permission.EYE_TRACKING";
 		permissions[feature::face_tracking] = "com.oculus.permission.FACE_TRACKING";
+		permissions[feature::body_tracking] = "com.oculus.permission.BODY_TRACKING";
 
 		// Quest hand tracking creates a fake khr/simple_controller when hand tracking
 		// is enabled, this messes with native hand tracking

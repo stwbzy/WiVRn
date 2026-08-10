@@ -115,6 +115,36 @@ If `false` or unset, WiVRn will use both TCP and UDP.
 }
 ```
 
+## `disconnect-policy`
+
+Default value: `pause`
+
+Controls what happens to the PC OpenXR session after a voluntary disconnect.
+
+- `pause` keeps the application alive, invisible and unfocused until the same paired headset
+  resumes the session or WiVRn is stopped.
+- `terminate` closes the OpenXR session and releases its compositor, audio and network resources.
+
+The headset's Disconnect button and `wivrnctl disconnect --mode default` use this value.
+`wivrnctl disconnect --mode pause|terminate` overrides it for one request.
+
+Unexpected transport loss always uses the separate 30-second automatic-resume window; it is not
+controlled by this setting.
+
+Example:
+
+```json
+{
+	"disconnect-policy": "pause"
+}
+```
+
+Only `pause` and `terminate` are valid. This policy applies to voluntary
+disconnects; link-loss classification, the retry deadline, paired-headset
+identity, and session-token validation cannot be weakened through
+configuration. See [connection-lifecycle.md](connection-lifecycle.md) for the
+complete state and resource behavior.
+
 ## `publish-service`
 Default value: `avahi`
 

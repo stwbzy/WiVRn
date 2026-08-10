@@ -286,6 +286,7 @@ configuration::configuration(xr::system & system, xr::session & session, const s
 				}
 			}
 		}
+		body_part_mask &= static_cast<std::underlying_type_t<wivrn::from_headset::body_part_mask>>(wivrn::from_headset::body_part_mask::max) - 1;
 
 		// nested object
 		if (auto val = root["openxr_post_processing"]; val.is_object())
@@ -331,6 +332,7 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("forward_keyboard", &configuration::forward_keyboard),
 	        scalar("forward_mouse", &configuration::forward_mouse),
 	        scalar("forward_gamepad", &configuration::forward_gamepad),
+	        scalar("body_part_mask", &configuration::body_part_mask),
 	        scalar("virtual_keyboard_layout", &configuration::virtual_keyboard_layout),
 	        scalar("override_foveation_enable", &configuration::override_foveation_enable),
 	        scalar("override_foveation_pitch", &configuration::override_foveation_pitch),

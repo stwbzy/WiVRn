@@ -84,6 +84,7 @@ private:
 #ifdef __ANDROID__
 	ANativeWindow * native_window = nullptr;
 	bool resumed = false;
+	bool restart_requested = false;
 
 	android_hid::input_handler input_handler{};
 #endif
@@ -154,6 +155,9 @@ private:
 	std::vector<std::shared_ptr<scene>> scene_stack;
 	std::weak_ptr<scene> last_scene;
 	std::chrono::nanoseconds last_scene_cpu_time;
+	std::optional<std::chrono::steady_clock::time_point> transient_frame_wait_failure_since;
+	std::optional<std::chrono::steady_clock::time_point> recovered_connection_frame_wait_failure_since;
+	uint64_t transient_frame_wait_failure_count = 0;
 
 	std::optional<configuration> config;
 	std::optional<configuration> default_config;
@@ -164,6 +168,9 @@ private:
 
 private:
 	void loop();
+#ifdef __ANDROID__
+	void request_restart_after_runtime_failure();
+#endif
 
 	std::mutex debug_report_mutex;
 	static VkBool32 vulkan_debug_report_callback(

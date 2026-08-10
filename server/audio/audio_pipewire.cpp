@@ -22,10 +22,12 @@
 #include "os/os_time.h"
 #include "util/u_logging.h"
 #include "utils/ring_buffer.h"
+#include <atomic>
 #include <magic_enum.hpp>
 #include <memory>
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
+#include <spa/utils/result.h>
 
 namespace wivrn
 {
@@ -59,6 +61,7 @@ struct pipewire_device : public audio_device
 
 	utils::ring_buffer<audio_data, 100> mic_samples;
 	std::atomic<size_t> mic_buffer_size_bytes;
+	std::atomic_bool paused{false};
 	audio_data mic_current;
 	std::unique_ptr<pw_stream, deleter> microphone;
 	std::atomic<std::underlying_type_t<pw_stream_state>> mic_state{PW_STREAM_STATE_UNCONNECTED};
@@ -72,6 +75,8 @@ struct pipewire_device : public audio_device
 	static void speaker_process(void * self_v);
 	static void mic_process(void * self_v);
 	static void mic_state_changed(void * self_v, pw_stream_state old, pw_stream_state state, const char * error);
+	static int set_active_in_loop(spa_loop *, bool, uint32_t, const void *, size_t, void * self_v);
+	void set_active(bool active);
 
 	void process_mic_data(wivrn::audio_data &&) override;
 	void pause() override;
@@ -388,6 +393,11 @@ void pipewire_device::speaker_process(void * self_v)
 	const auto & data = buffer->buffer->datas[0];
 	if (not data.data)
 		return;
+	if (self->paused)
+	{
+		pw_stream_queue_buffer(self->speaker.get(), buffer);
+		return;
+	}
 
 	try
 	{
@@ -407,17 +417,81 @@ void pipewire_device::speaker_process(void * self_v)
 
 void pipewire_device::process_mic_data(wivrn::audio_data && sample)
 {
+	if (paused)
+		return;
+
 	auto size = sample.payload.size_bytes();
 	if (mic_samples.write(std::move(sample)))
 		mic_buffer_size_bytes += size;
 }
 
+int pipewire_device::set_active_in_loop(spa_loop *, bool, uint32_t, const void * data, size_t size, void * self_v)
+{
+	auto self = static_cast<pipewire_device *>(self_v);
+	if (size != sizeof(bool))
+		return -EINVAL;
+
+	const bool active = *static_cast<const bool *>(data);
+	int result = 0;
+	int speaker_result = 0;
+	int microphone_result = 0;
+	if (self->speaker)
+	{
+		speaker_result = pw_stream_set_active(self->speaker.get(), active);
+		if (speaker_result < 0)
+			result = speaker_result;
+	}
+	if (self->microphone)
+	{
+		microphone_result = pw_stream_set_active(self->microphone.get(), active);
+		if (microphone_result < 0)
+			result = microphone_result;
+	}
+	U_LOG_I("PipeWire streams active=%s speaker_result=%d microphone_result=%d speaker_state=%s microphone_state=%s",
+	        active ? "true" : "false",
+	        speaker_result,
+	        microphone_result,
+	        self->speaker ? pw_stream_state_as_string(pw_stream_get_state(self->speaker.get(), nullptr)) : "unavailable",
+	        self->microphone ? pw_stream_state_as_string(pw_stream_get_state(self->microphone.get(), nullptr)) : "unavailable");
+
+	if (not active)
+	{
+		while (self->mic_samples.read())
+		{
+		}
+		self->mic_current = {};
+		self->mic_buffer_size_bytes = 0;
+	}
+
+	return result;
+}
+
+void pipewire_device::set_active(bool active)
+{
+	const int result = pw_loop_invoke(
+	        pw_main_loop_get_loop(pw_loop.get()),
+	        &pipewire_device::set_active_in_loop,
+	        SPA_ID_INVALID,
+	        &active,
+	        sizeof(active),
+	        true,
+	        this);
+	if (result < 0)
+		U_LOG_W("Failed to %s PipeWire streams: %s", active ? "resume" : "pause", spa_strerror(result));
+}
+
 void pipewire_device::pause()
 {
+	if (paused.exchange(true))
+		return;
+
+	set_active(false);
 }
 
 void pipewire_device::resume()
 {
+	if (paused.exchange(false))
+		set_active(true);
 	session.send_control(to_headset::audio_stream_description{desc});
 	session.send_control(to_headset::feature_control{to_headset::feature_control::microphone, mic_state == PW_STREAM_STATE_STREAMING});
 }

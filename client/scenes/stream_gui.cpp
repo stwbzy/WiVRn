@@ -979,14 +979,14 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 			{
 				for (const auto & app: running_applications.lock()->applications)
 					network_session->send_control(from_headset::stop_application{.id = app.id});
-				exit();
+				this->request_disconnect();
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::SameLine();
 
 			if (button(disconnect_only, wivrn::ui::button_style::primary, {disconnect_only_w, 0}))
 			{
-				exit();
+				this->request_disconnect();
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::SameLine();

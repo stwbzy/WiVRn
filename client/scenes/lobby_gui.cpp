@@ -103,9 +103,32 @@ void scenes::lobby::gui_connecting(locked_notifiable<pin_request_data> & pin_req
 	std::string status;
 	if (next_scene)
 	{
-		current_tab = tab::connected;
-		ImGui::CloseCurrentPopup();
-		return;
+		switch (next_scene->current_state())
+		{
+			case stream::state::streaming:
+				current_tab = tab::connected;
+				ImGui::CloseCurrentPopup();
+				return;
+			case stream::state::reconnecting:
+				close_button_label = _("Stop trying");
+				status = fmt::format(
+				        _F("Connection lost ({}). Reconnecting… {} s remaining"),
+				        to_string(next_scene->reconnect_close_reason()),
+				        next_scene->reconnect_remaining_seconds());
+				break;
+			case stream::state::initializing:
+				status = _("Connection restored. Waiting for a fresh video frame…");
+				break;
+			case stream::state::disconnecting:
+				status = _("Disconnecting cleanly…");
+				break;
+			case stream::state::stalled:
+				status = _("The stream has stalled.");
+				break;
+			case stream::state::shutdown:
+				ImGui::CloseCurrentPopup();
+				return;
+		}
 	}
 	else if (async_session.valid())
 		status = async_session.get_progress();
@@ -141,6 +164,8 @@ void scenes::lobby::gui_connecting(locked_notifiable<pin_request_data> & pin_req
 	if (ui::button(close_button_label, ui::button_style::secondary, {bw, 0}))
 	{
 		async_session.cancel();
+		if (next_scene)
+			next_scene->exit();
 		next_scene.reset();
 
 		pin_request->pin_cancelled = true;
@@ -243,8 +268,7 @@ void scenes::lobby::gui_connected(XrTime predicted_display_time)
 
 	if (next_scene->apps.draw_gui(*imgui_ctx, _("Disconnect")) == app_launcher::Cancel)
 	{
-		next_scene->exit();
-		current_tab = tab::server_list;
+		next_scene->request_disconnect();
 	}
 }
 

@@ -114,12 +114,22 @@ class wivrn_session : public xrt_system_devices
 	std::ofstream feedback_csv;
 
 	std::unique_ptr<audio_device> audio_handle;
+	bool audio_needs_recreate = false;
 
 	// when sessions shall be destroyed, key is client id, value is timestamp
 	thread_safe<std::map<uint32_t, int64_t>> session_loss;
 
 	std::jthread net_thread;
 	std::jthread worker_thread;
+	connection_lifecycle lifecycle;
+	std::atomic<bool> session_paused{true};
+	std::optional<disconnect_mode> requested_disconnect;
+	std::optional<disconnect_mode> pending_server_disconnect;
+	std::chrono::steady_clock::time_point pending_disconnect_deadline{};
+	std::chrono::steady_clock::time_point last_control_heartbeat{};
+	std::chrono::steady_clock::time_point last_stream_heartbeat{};
+	uint64_t heartbeat_sequence = 0; // network thread only
+	uint64_t reported_discarded_packets = 0;
 
 	wivrn_session(std::unique_ptr<wivrn_connection> connection, b_system &);
 
@@ -141,6 +151,10 @@ public:
 
 	clock_offset get_offset();
 	bool connected();
+	uint64_t connection_generation() const
+	{
+		return connection->get_generation();
+	}
 	const from_headset::headset_info_packet & get_info() const
 	{
 		return headset_info;
@@ -167,6 +181,10 @@ public:
 	void operator()(from_headset::headset_info_packet &&);
 	void operator()(const from_headset::settings_changed &);
 	void operator()(from_headset::handshake &&) {}
+	void operator()(from_headset::disconnect_request &&);
+	void operator()(from_headset::disconnect_ack &&);
+	void operator()(from_headset::heartbeat &&);
+	void operator()(from_headset::stream_ready &&);
 	void operator()(const from_headset::tracking &);
 	void operator()(from_headset::derived_pose &&);
 	void operator()(from_headset::hand_tracking &&);
@@ -222,10 +240,13 @@ public:
 private:
 	void run_net(std::stop_token stop);
 	void run_worker(std::stop_token stop);
-	void reconnect(std::stop_token stop);
+	bool reconnect(std::stop_token stop, std::optional<std::chrono::steady_clock::time_point> deadline);
 
 	void pause_session();
 	void resume_session();
+	void transition(server_connection_state, connection_close_reason = connection_close_reason::none);
+	bool accept_packet_generation(uint64_t);
+	void report_counters();
 
 	void update_client_states(bool visible, bool focused);
 	void poll_session_loss();

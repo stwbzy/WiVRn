@@ -266,6 +266,8 @@ public:
 	void on_unfocused() override;
 	void on_focused() override;
 	void on_xr_event(const xr::event &) override;
+	bool allow_transient_frame_wait_failure() const override;
+	bool connection_recovered_while_frame_wait_failed() const override;
 
 	static meta & get_meta_scene();
 };
