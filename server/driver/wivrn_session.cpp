@@ -1455,6 +1455,9 @@ std::pair<bool, std::optional<std::string>> wivrn_session::validate_headset_info
 	{
 		refuse |= prev_info.render_eye_width != info.render_eye_width;
 		refuse |= prev_info.render_eye_height != info.render_eye_height;
+		refuse |= prev_info.native_eye_width != info.native_eye_width;
+		refuse |= prev_info.native_eye_height != info.native_eye_height;
+		refuse |= prev_info.fsr_upscaling != info.fsr_upscaling;
 		refuse |= prev_info.stream_eye_width != info.stream_eye_width;
 		refuse |= prev_info.stream_eye_height != info.stream_eye_height;
 

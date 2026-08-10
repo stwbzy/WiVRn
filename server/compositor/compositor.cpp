@@ -63,7 +63,6 @@ static auto renderdoc()
 #endif
 
 DEBUG_GET_ONCE_LOG_OPTION(log, "XRT_COMPOSITOR_LOG", U_LOGGING_INFO)
-DEBUG_GET_ONCE_BOOL_OPTION(fsr_frame_generation, "WIVRN_FSR_FRAME_GENERATION", false)
 
 namespace details
 {
@@ -275,72 +274,6 @@ xrt_result_t compositor::mark_frame(int64_t frame_id,
 	return XRT_ERROR_VULKAN;
 }
 
-void compositor::inspect_frame_generation_inputs()
-{
-	if (!frame_generation_probe.requested)
-		return;
-
-	uint32_t projection_layers = 0;
-	uint32_t depth_layers = 0;
-	uint32_t depth_views = 0;
-	uint32_t synthesis_layers = 0;
-	uint32_t synthesis_depth_views = 0;
-	uint32_t motion_vector_views = 0;
-
-	for (uint32_t layer_index = 0; layer_index < layer_accum.layer_count; ++layer_index)
-	{
-		const auto & layer = layer_accum.layers[layer_index];
-		if (layer.data.type == XRT_LAYER_PROJECTION)
-		{
-			projection_layers++;
-			bool has_synthesis = false;
-			for (uint32_t view = 0; view < layer.data.view_count; ++view)
-			{
-				const auto & synthesis = layer.data.proj.v[view].frame_synthesis;
-				if (synthesis.valid)
-				{
-					has_synthesis = true;
-					motion_vector_views++;
-					if (synthesis.depth.rect.extent.w > 0 && synthesis.depth.rect.extent.h > 0)
-						synthesis_depth_views++;
-				}
-			}
-			if (has_synthesis)
-				synthesis_layers++;
-		}
-		else if (layer.data.type == XRT_LAYER_PROJECTION_DEPTH)
-		{
-			depth_layers++;
-			depth_views += layer.data.view_count;
-		}
-	}
-
-	frame_generation_probe.frames++;
-	const bool standard_depth_ready = depth_layers > 0 && depth_views > 0;
-	const bool inputs_ready = synthesis_layers > 0 && motion_vector_views == synthesis_depth_views &&
-	                          synthesis_depth_views > 0;
-	if (!frame_generation_probe.reported || inputs_ready != frame_generation_probe.last_inputs_ready)
-	{
-		U_LOG_I("FSR frame-generation compositor probe: requested=%u frame=%" PRIu64
-		        " layers=%u projection_layers=%u depth_layers=%u depth_views=%u synthesis_layers=%u"
-		        " synthesis_depth_views=%u motion_vector_views=%u standard_depth_ready=%u inputs_ready=%u"
-		        " backend=none fallback=normal-composition",
-		        frame_generation_probe.requested,
-		        frame_generation_probe.frames,
-		        layer_accum.layer_count,
-		        projection_layers,
-		        depth_layers,
-		        depth_views,
-		        synthesis_layers,
-		        synthesis_depth_views,
-		        motion_vector_views,
-		        standard_depth_ready,
-		        inputs_ready);
-		frame_generation_probe.reported = true;
-		frame_generation_probe.last_inputs_ready = inputs_ready;
-	}
-}
-
 xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 {
 	u_graphics_sync_unref(&sync_handle);
@@ -353,8 +286,6 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 		comp_frame_clear_locked(&frame.rendering);
 		return XRT_SUCCESS;
 	}
-	inspect_frame_generation_inputs();
-
 	U_LOG_IFL_D(log_level, "frame %ld commit %d layers", frame.rendering.id, layer_accum.layer_count);
 
 	if (encode_request >= 0 // encoders have not picked up the previous frame
@@ -399,7 +330,7 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	beman::inplace_vector::inplace_vector<vk::ImageMemoryBarrier2, 3> image_barriers;
 
 	// Check if we can pass a layer directly to foveation
-	if (layer_accum.layer_count == 1 and
+	if (!spatial_upscaler and layer_accum.layer_count == 1 and
 	    (layer_accum.layers[0].data.type == XRT_LAYER_PROJECTION or
 	     layer_accum.layers[0].data.type == XRT_LAYER_PROJECTION_DEPTH))
 	{
@@ -422,7 +353,7 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	{
 		// no fast-path, squash layers
 		std::array<xrt_pose, 2> poses;
-		const auto extent = images[0].image.info().extent;
+		const auto extent = spatial_upscaler ? render_extent(session.get_info()) : images[0].image.info().extent;
 		std::tie(poses, src_fov, src_rect) = squasher.do_layers(
 		        vk.device,
 		        cmd,
@@ -432,7 +363,7 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 		        layer_accum,
 		        xrt_rect{.extent{.w = int(extent.width), .h = int(extent.height)}});
 
-		src = squasher.get_views();
+		src = spatial_upscaler ? squasher.get_unorm_views() : squasher.get_views();
 
 		for (int view = 0; view < 2; ++view)
 		{
@@ -483,6 +414,12 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	{
 		auto now = os_monotonic_get_ns();
 		session.add_tracking_request(device_id::EYE_GAZE, frame.rendering.desired_present_time_ns, now, now);
+	}
+	if (spatial_upscaler)
+	{
+		auto upscaled = spatial_upscaler->upscale(vk.device, cmd, src, src_rect, false);
+		src = upscaled.views;
+		src_rect = upscaled.rects;
 	}
 	view_info.foveation = foveation.foveate(
 	        vk.device,
@@ -779,10 +716,35 @@ compositor::compositor(wivrn_session & session) :
         squasher(vk, render_extent(session.get_info())),
         foveation(vk, images[0].image.info().extent)
 {
-	frame_generation_probe.requested = debug_get_bool_option_fsr_frame_generation();
-	if (frame_generation_probe.requested)
+	if (fsr_upscaling_enabled(session.get_info()))
 	{
-		U_LOG_I("FSR frame-generation compositor probe enabled: metadata-only, normal composition retained");
+		try
+		{
+			spatial_upscaler.emplace(vk,
+			                           render_extent(session.get_info()),
+			                           fsr_output_extent(session.get_info()));
+			const auto input = spatial_upscaler->input_size();
+			const auto output = spatial_upscaler->output_size();
+			U_LOG_IFL_I(log_level,
+			            "FSR 1 spatial upscaling enabled: %ux%u -> %ux%u per eye, RCAS %.2f",
+			            input.width,
+			            input.height,
+			            output.width,
+			            output.height,
+			            fsr_rcas_sharpness_stops());
+		}
+		catch (const std::exception & e)
+		{
+			spatial_upscaler.reset();
+			U_LOG_IFL_W(log_level,
+			            "Cannot initialize FSR 1 spatial upscaling: %s; using normal composition",
+			            e.what());
+		}
+	}
+	else if (session.get_info().fsr_upscaling)
+	{
+		U_LOG_IFL_W(log_level,
+		            "FSR 1 spatial upscaling requested with unsupported dimensions; using normal composition");
 	}
 
 	comp_base * c_base = this;
@@ -926,8 +888,6 @@ void compositor::resume()
 	for (auto & encoder: encoders)
 		encoder->reset();
 	pacer.reset();
-	frame_generation_probe.frames = 0;
-	frame_generation_probe.reported = false;
 	send_video_stream_description();
 	paused = false;
 }
@@ -951,8 +911,6 @@ void compositor::pause()
 	comp_frame_clear_locked(&frame.waited);
 	comp_frame_clear_locked(&frame.rendering);
 	pacer.reset();
-	frame_generation_probe.frames = 0;
-	frame_generation_probe.reported = false;
 }
 
 void compositor::on_feedback(const from_headset::feedback & feedback, const clock_offset & o)

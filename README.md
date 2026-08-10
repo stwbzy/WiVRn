@@ -23,20 +23,20 @@ and OpenXR applications.
 - **Refreshed headset UI:** clearer streaming and reconnection states, a safe
   local recovery panel with a countdown, improved settings, and functional
   virtual full-body tracker selection on Quest.
-- **Experimental Space Warp:** validation and transport of stereo color,
-  depth, and motion-vector metadata for `XR_FB_space_warp` and
-  `XR_EXT_frame_synthesis`, including diagnostic tools and safe fallback to
-  normal composition.
-- **FSR experimentation:** groundwork and diagnostics for runtime-owned AMD
-  FSR3 integration without modifying VRChat or other game binaries.
+- **Frame generation removed:** the server has no temporal history, optical
+  flow, candidate-frame, handoff, or double-rate path. Streaming remains one
+  encoded frame per OpenXR frame.
+- **FSR 1 image reconstruction:** an opt-in two-pass FidelityFX EASU + RCAS
+  path reconstructs a reduced application render to the headset's recommended
+  per-eye resolution before WiVRn foveation and encoding.
 
 > [!NOTE]
-> The Space Warp/frame-synthesis metadata path is implemented, but the final
-> Vulkan image-generation backend is still experimental. When its inputs or
-> backend are unavailable, WiVRn deliberately retains normal composition.
+> This fork does not embed AMD FidelityFX FSR 3. Spatial reconstruction is a
+> 32-bit Vulkan port of the open-source FSR 1 EASU/RCAS algorithms. It does
+> not synthesize frames and is independent of headset Application SpaceWarp.
 
 See the [connection lifecycle](docs/connection-lifecycle.md),
-[Space Warp and FSR technical status](docs/fsr-frame-generation.md), and
+[FSR spatial upscaling](docs/fsr-spatial.md), and
 [project roadmap](docs/roadmap.md) for details.
 
 # About
@@ -165,25 +165,15 @@ The same overrides should work for other VR applications distributed as Flatpaks
 
 See [building](docs/building.md) for building the [dashboard](docs/building.md#dashboard), [server (PC)](docs/building.md#server-pc), and [client (headset)](docs/building.md#client-headset)
 
-## Experimental FSR Frame Generation fork
+## FSR 1 spatial-upscaling fork
 
-This checkout contains an experimental branch for integrating runtime-owned
-OpenXR Space Warp and AMD FSR3 Frame Generation without modifying VRChat or
-any game binary. Reproducible build commands, current capability limitations,
-and safety rules are documented in
-[docs/fsr-frame-generation.md](docs/fsr-frame-generation.md).
-
-As of 2026-08-09, the build-tree runtime validates and transports stereo color,
-depth, and motion-vector metadata for `XR_EXT_frame_synthesis` and
-`XR_FB_space_warp`. The standalone `wivrn-fsr-openxr-harness` completed a
-20,000-frame structural run against the matching server, including a voluntary
-disconnect/resume. A physical Quest 3S Wi-Fi cut also resumed the same PC
-OpenXR application across connection generations.
-
-Frame Generation itself is still not active. The compositor deliberately logs
-`backend=none fallback=normal-composition`; no generated image is submitted and
-the current evidence does not demonstrate visual 45→90 interpolation. The next
-FSR milestone is a real Vulkan/FSR3 backend, synchronization, and frame pacing.
+This checkout contains an AMD FidelityFX FSR 1 spatial path: EASU
+reconstructs a reduced render to the headset's recommended resolution and
+RCAS sharpens it before WiVRn foveation/encoding. It is not FSR 3. The PC
+server contains no frame-generation backend. Enable **FSR 1 spatial
+upscaling** in the headset Video menu at a render resolution below 100%, then
+reconnect. Commands, expected logs, limitations, and the stability checklist
+are in [docs/fsr-spatial.md](docs/fsr-spatial.md).
 
 The same branch also contains the deterministic connection lifecycle described
 in [docs/connection-lifecycle.md](docs/connection-lifecycle.md). See the

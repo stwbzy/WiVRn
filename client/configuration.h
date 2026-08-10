@@ -67,6 +67,7 @@ public:
 	float preferred_refresh_rate = 0;
 	std::optional<float> minimum_refresh_rate;
 	float resolution_scale = 1.0;
+	bool fsr_upscaling = false;
 	std::optional<wivrn::video_codec> codec;
 	uint32_t bitrate_bps = 50'000'000;
 	uint8_t bit_depth = 10;
@@ -142,6 +143,11 @@ public:
 	void set_stream_scale(float);
 	float get_stream_scale() const;
 	float get_default_stream_scale() const;
+
+	bool use_fsr_upscaling() const
+	{
+		return fsr_upscaling && resolution_scale > 0.0f && resolution_scale < 1.0f;
+	}
 
 	uint32_t max_bitrate(bool extended) const
 	{

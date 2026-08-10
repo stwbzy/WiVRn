@@ -179,6 +179,6 @@ Still required before a release claim:
   source-address changes;
 - leak checks for native threads, locks, and persistent MediaCodec failures.
 
-The frame-synthesis harness validates metadata transport and lifecycle
-stability only. It does not prove visual 45→90 frame generation; see
-[fsr-frame-generation.md](fsr-frame-generation.md).
+FSR spatial upscaling has no temporal state to restore. A reconnect creates a
+fresh compositor and FSR resources, and the encoder starts again with an IDR;
+see [fsr-spatial.md](fsr-spatial.md).

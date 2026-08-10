@@ -42,7 +42,6 @@ set(XRT_FEATURE_OPENXR_FACE_TRACKING_ANDROID     ON)
 set(XRT_FEATURE_OPENXR_FACE_TRACKING2_FB         ON)
 set(XRT_FEATURE_OPENXR_FACIAL_TRACKING_HTC       ON)
 set(XRT_FEATURE_OPENXR_HAND_TRACKING_EXT         ON)
-set(XRT_FEATURE_OPENXR_FRAME_SYNTHESIS           ON CACHE BOOL "Enable XR_EXT_frame_synthesis metadata transport" FORCE)
 set(XRT_FEATURE_OPENXR_INTERACTION_EXT_HAND      ON)
 set(XRT_FEATURE_OPENXR_INTERACTION_EXT_PALM_POSE ON)
 set(XRT_FEATURE_OPENXR_INTERACTION_BYTEDANCE     ON)
@@ -50,7 +49,6 @@ set(XRT_FEATURE_OPENXR_INTERACTION_VIVE_FOCUS3   ON)
 set(XRT_FEATURE_OPENXR_INTERACTION_TOUCH_PRO     ON)
 set(XRT_FEATURE_OPENXR_INTERACTION_TOUCH_PLUS    ON)
 set(XRT_FEATURE_OPENXR_LAYER_COLOR_SCALE_BIAS    ON)
-set(XRT_FEATURE_OPENXR_SPACE_WARP                ON CACHE BOOL "Enable XR_FB_space_warp metadata transport" FORCE)
 
 set(XRT_HAVE_BLUETOOTH               OFF)
 set(XRT_HAVE_GST                     OFF)
@@ -108,6 +106,8 @@ if (WIVRN_BUILD_SERVER)
 			compositor/compositor.cpp
 			compositor/layer_squasher.cpp
 			compositor/foveation.cpp
+			compositor/fsr_config.cpp
+			compositor/fsr_upscaler.cpp
 			compositor/pacer.cpp
 
 			encoder/encoder_settings.cpp
@@ -281,9 +281,21 @@ if (WIVRN_BUILD_SERVER)
 		SHADERS
 			"${_monado_src}/src/xrt/compositor/shaders/layer.comp"
 			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/foveation.comp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/fsr_easu.comp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/fsr_rcas.comp"
 		)
 
 	target_compile_definitions(wivrn-server PRIVATE JSON_DIAGNOSTICS=1)
+
+	if(WIVRN_BUILD_TEST)
+		add_executable(fsr-config-test
+			compositor/fsr_config.cpp
+			compositor/fsr_config_test.cpp)
+		target_compile_features(fsr-config-test PRIVATE cxx_std_20)
+		target_include_directories(fsr-config-test PRIVATE .)
+		target_link_libraries(fsr-config-test PRIVATE wivrn-common wivrn-external)
+		add_test(NAME fsr-config COMMAND fsr-config-test)
+	endif()
 
 	configure_file(dist/wivrn.service.in wivrn.service)
 	install(FILES ${CMAKE_CURRENT_BINARY_DIR}/wivrn.service

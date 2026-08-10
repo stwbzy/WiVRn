@@ -50,10 +50,10 @@ To also instrument Monado under the same switch, use the `server-tracing-monado`
 
 See [profiling](profiling.md) for how to run the server with tracing and capture/analyse traces.
 
-## Experimental FSR Frame Generation build
+## Stable FSR 1 spatial-upscaling build
 
-For the current WiVRn FSR work, use the reproducible server preset and keep
-the generated runtime in the build tree:
+Use the reproducible server preset and keep the generated runtime in the build
+tree:
 
 ```bash
 cmake --preset server-no-system-boost \
@@ -63,49 +63,28 @@ cmake --preset server-no-system-boost \
 cmake --build build-server-no-system-boost -j2
 ```
 
-This build includes the opt-in OpenXR metadata validation/transport and the
-compositor diagnostic probe, but it has no Space Warp/FSR3 synthesis backend
-and does not replace the installed WiVRn runtime. To inspect the input path
-while developing the PC server, start the build-tree server explicitly with:
+Build the matching Android client as well. The APK and server should still
+come from the same source revision because the connection protocol is paired:
 
 ```bash
-WIVRN_FSR_FRAME_GENERATION=1 \
-  build-server-no-system-boost/server/wivrn-server
+ANDROID_HOME=/home/stwby/Android ./gradlew assembleDebug
+adb install -r build/outputs/apk/debug/WiVRn-fsr-spatial-debug.apk
 ```
 
-The probe is read-only: it reports projection/depth layers and any transported
-motion-vector metadata, then keeps normal composition. See
-[fsr-frame-generation.md](fsr-frame-generation.md) for the fork status,
-runtime architecture, and acceptance criteria.
-
-### OpenXR diagnostic harness
-
-The test build also produces a standalone Vulkan/OpenXR harness. It does not
-launch VRChat, write swapchain pixels, or synthesize frames:
+Set headset **Render resolution** to 80%, enable **FSR 1 spatial upscaling** in
+Video, leave **Application SpaceWarp** off for A/B testing, and reconnect. Run
+the server normally:
 
 ```bash
-cmake --build build-server-no-system-boost \
-  --target wivrn-fsr-openxr-harness -j2
-
-XR_RUNTIME_JSON="$PWD/build-server-no-system-boost/openxr_wivrn-dev.json" \
-  build-server-no-system-boost/tools/wivrn-fsr-openxr-harness \
-  --normal --frames 1
+XRT_PRINT_OPTIONS=1 XRT_LOG=info \
+build-server-no-system-boost/server/wivrn-server \
+  --no-fork --early-active-runtime
 ```
 
-Use `--frame-synthesis` or `--space-warp` to submit the corresponding
-per-view metadata path. The harness creates two color swapchains and, for the
-metadata modes, two motion-vector and two depth swapchains. It is a structural
-probe only. The current build-tree runtime and server completed a 20,000-frame
-`--frame-synthesis` run, demonstrating extension negotiation, validation, IPC
-transport, and `views=2`; it does not demonstrate FSR3 image generation.
-
-Always pair the build-tree OpenXR manifest and harness with the server from the
-same build directory. Do not use `IPC_IGNORE_VERSION=1` to bridge an installed
-runtime and an unrelated server: their IPC layouts may differ even if the
-version check is bypassed. The variable was used during the structural test
-only with matching build-tree components. See
-[fsr-frame-generation.md](fsr-frame-generation.md#diagnostic-harness) for the
-exact command and interpretation.
+This is not AMD FidelityFX FSR 3: it is a 32-bit Vulkan port of AMD FSR 1
+EASU/RCAS. See [fsr-spatial.md](fsr-spatial.md) for the FSR-only smoke test,
+expected logs and stability checklist. Always use an APK and server produced
+from the same commit because the FSR handshake changes the protocol hash.
 
 # Dashboard
 
@@ -178,8 +157,8 @@ Outputs are written below `build/outputs/apk/debug/` and
 `build/outputs/apk/release/`. In this fork the local artifacts are:
 
 ```text
-build/outputs/apk/debug/WiVRn-fsr-debug.apk
-build/outputs/apk/release/WiVRn-fsr-release-unsigned.apk
+build/outputs/apk/debug/WiVRn-fsr-spatial-debug.apk
+build/outputs/apk/release/WiVRn-fsr-spatial-release-unsigned.apk
 ```
 
 The debug artifact uses the Gradle debug key. A release artifact remains
@@ -202,7 +181,7 @@ adb start-server
 adb devices
 
 # Install apk
-adb install -r build/outputs/apk/debug/WiVRn-fsr-debug.apk
+adb install -r build/outputs/apk/debug/WiVRn-fsr-spatial-debug.apk
 
 # When you're done, you can stop the adb server
 adb kill-server

@@ -281,6 +281,20 @@ void settings_video(const settings_context & ctx)
 		});
 	}
 
+	list.push_back({
+	        .id = "##fsr_upscaling",
+	        .label = _("FSR 1 spatial upscaling"),
+	        .description = _("Reconstructs a sub-native render resolution before encoding. Requires reconnection and does not generate frames."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.fsr_upscaling; },
+	        .set_bool = [&config](bool v) { config.fsr_upscaling = v; config.save(); },
+	        .default_bool = default_config.fsr_upscaling,
+	        .enabled = [&ctx, &config] { return not ctx.in_game && config.resolution_scale < 1.0f; },
+	        .disabled_tooltip = ctx.in_game
+	                                    ? disconnect_tip
+	                                    : _("Set render resolution below 100% to enable FSR 1."),
+	});
+
 	if (ctx.instance.has_extension(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME))
 	{
 		list.push_back({

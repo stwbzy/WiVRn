@@ -18,6 +18,7 @@
  */
 #include "encoder_settings.h"
 
+#include "compositor/fsr_config.h"
 #include "driver/configuration.h"
 #include "driver/wivrn_session.h"
 #include "util/u_logging.h"
@@ -266,11 +267,6 @@ public:
 };
 } // namespace
 
-static uint16_t align(uint16_t value, uint16_t alignment)
-{
-	return ((value + alignment - 1) / alignment) * alignment;
-}
-
 std::array<encoder_settings, 3> get_encoder_settings(wivrn::vk_bundle & bundle, wivrn_session & session)
 {
 	configuration config;
@@ -290,8 +286,9 @@ std::array<encoder_settings, 3> get_encoder_settings(wivrn::vk_bundle & bundle, 
 		std::tie(dst.encoder_name, dst.codec) = prober.select_encoder(src);
 	}
 
-	auto width = align(info.stream_eye_width, 64);
-	auto height = align(info.stream_eye_height, 64);
+	const auto encoder_extent = fsr_encoder_dimensions(info);
+	auto width = encoder_extent[0];
+	auto height = encoder_extent[1];
 	// Ensure we don't try to encode too large images (only for left/right, ignore alpha)
 	for (size_t i = 0; i < 2; ++i)
 		check_video_size(res[i].encoder_name, res[i].codec, width, height);

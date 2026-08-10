@@ -198,3 +198,16 @@ Change the TCP/UDP port used for the connection.
 Default value: unset
 
 If set, overrides the name displayed in the server list.
+
+## FSR 1 spatial upscaling
+
+The headset setting `fsr_upscaling` defaults to `false` and is persisted in
+`client.json`. In **Settings → Video**, first set **Render resolution** below
+100%, then enable **FSR 1 spatial upscaling**. Both settings are locked during
+a session and take effect after reconnection.
+
+FSR reconstructs the reduced render to the runtime's native per-eye size, then
+the existing foveated encoder produces the stream size. RCAS defaults to 0.2
+stops and is clamped to the supported 0–2 range. Application SpaceWarp is a
+separate headset feature; leave it off while testing FSR. See
+[fsr-spatial.md](fsr-spatial.md) for the A/B procedure.

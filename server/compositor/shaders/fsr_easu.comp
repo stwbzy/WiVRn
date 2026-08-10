@@ -1,0 +1,207 @@
+#version 450
+
+// 32-bit GLSL port of AMD FidelityFX FSR 1 EASU.
+// Algorithm source: GPUOpen-Effects/FidelityFX-FSR, ffx_fsr1.h (v1.20210629).
+// Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to
+// deal in the Software without restriction, including without limitation the
+// rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+// sell copies of the Software, subject to inclusion of this notice.
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0) uniform sampler2D source_color;
+layout(binding = 1, rgba16f) uniform writeonly image2D destination_color;
+
+layout(push_constant) uniform constants
+{
+	vec4 con0;
+	vec4 con1;
+	vec4 con2;
+	vec4 con3;
+	ivec2 output_offset;
+	uvec2 output_size;
+	uint source_is_linear;
+} pc;
+
+vec4 linear_to_srgb(vec4 color)
+{
+	vec4 low = color * 12.92;
+	vec4 high = 1.055 * pow(max(color, vec4(0.0)), vec4(1.0 / 2.4)) - 0.055;
+	return mix(high, low, lessThanEqual(color, vec4(0.0031308)));
+}
+
+vec4 prepare_input(vec4 channel)
+{
+	return pc.source_is_linear != 0 ? linear_to_srgb(channel) : channel;
+}
+
+vec4 gather_r(vec2 p)
+{
+	return prepare_input(textureGather(source_color, p, 0));
+}
+
+vec4 gather_g(vec2 p)
+{
+	return prepare_input(textureGather(source_color, p, 1));
+}
+
+vec4 gather_b(vec2 p)
+{
+	return prepare_input(textureGather(source_color, p, 2));
+}
+
+void easu_tap(inout vec3 accumulated_color,
+	          inout float accumulated_weight,
+	          vec2 offset,
+	          vec2 direction,
+	          vec2 length_scale,
+	          float lobe,
+	          float clipping_point,
+	          vec3 color)
+{
+	vec2 v;
+	v.x = offset.x * direction.x + offset.y * direction.y;
+	v.y = offset.x * -direction.y + offset.y * direction.x;
+	v *= length_scale;
+	float distance_squared = min(dot(v, v), clipping_point);
+	float window_b = (2.0 / 5.0) * distance_squared - 1.0;
+	float window_a = lobe * distance_squared - 1.0;
+	window_b *= window_b;
+	window_a *= window_a;
+	window_b = (25.0 / 16.0) * window_b - ((25.0 / 16.0) - 1.0);
+	float weight = window_b * window_a;
+	accumulated_color += color * weight;
+	accumulated_weight += weight;
+}
+
+void easu_set(inout vec2 direction,
+	          inout float edge_length,
+	          vec2 fractional_position,
+	          bvec4 bilinear_quadrant,
+	          float luma_a,
+	          float luma_b,
+	          float luma_c,
+	          float luma_d,
+	          float luma_e)
+{
+	float weight = 0.0;
+	if (bilinear_quadrant.x)
+		weight = (1.0 - fractional_position.x) * (1.0 - fractional_position.y);
+	if (bilinear_quadrant.y)
+		weight = fractional_position.x * (1.0 - fractional_position.y);
+	if (bilinear_quadrant.z)
+		weight = (1.0 - fractional_position.x) * fractional_position.y;
+	if (bilinear_quadrant.w)
+		weight = fractional_position.x * fractional_position.y;
+
+	float dc = luma_d - luma_c;
+	float cb = luma_c - luma_b;
+	float len_x = max(abs(dc), abs(cb));
+	float dir_x = luma_d - luma_b;
+	direction.x += dir_x * weight;
+	len_x = len_x > 0.0 ? clamp(abs(dir_x) / len_x, 0.0, 1.0) : 0.0;
+	edge_length += len_x * len_x * weight;
+
+	float ec = luma_e - luma_c;
+	float ca = luma_c - luma_a;
+	float len_y = max(abs(ec), abs(ca));
+	float dir_y = luma_e - luma_a;
+	direction.y += dir_y * weight;
+	len_y = len_y > 0.0 ? clamp(abs(dir_y) / len_y, 0.0, 1.0) : 0.0;
+	edge_length += len_y * len_y * weight;
+}
+
+void main()
+{
+	uvec2 output_pixel = gl_GlobalInvocationID.xy;
+	if (any(greaterThanEqual(output_pixel, pc.output_size)))
+		return;
+
+	vec2 position = vec2(output_pixel) * pc.con0.xy + pc.con0.zw;
+	vec2 base = floor(position);
+	vec2 fractional_position = position - base;
+
+	vec2 p0 = base * pc.con1.xy + pc.con1.zw;
+	vec2 p1 = p0 + pc.con2.xy;
+	vec2 p2 = p0 + pc.con2.zw;
+	vec2 p3 = p0 + pc.con3.xy;
+
+	vec4 bczz_r = gather_r(p0);
+	vec4 bczz_g = gather_g(p0);
+	vec4 bczz_b = gather_b(p0);
+	vec4 ijfe_r = gather_r(p1);
+	vec4 ijfe_g = gather_g(p1);
+	vec4 ijfe_b = gather_b(p1);
+	vec4 klhg_r = gather_r(p2);
+	vec4 klhg_g = gather_g(p2);
+	vec4 klhg_b = gather_b(p2);
+	vec4 zzon_r = gather_r(p3);
+	vec4 zzon_g = gather_g(p3);
+	vec4 zzon_b = gather_b(p3);
+
+	vec4 bczz_l = bczz_b * 0.5 + (bczz_r * 0.5 + bczz_g);
+	vec4 ijfe_l = ijfe_b * 0.5 + (ijfe_r * 0.5 + ijfe_g);
+	vec4 klhg_l = klhg_b * 0.5 + (klhg_r * 0.5 + klhg_g);
+	vec4 zzon_l = zzon_b * 0.5 + (zzon_r * 0.5 + zzon_g);
+
+	float b_l = bczz_l.x;
+	float c_l = bczz_l.y;
+	float i_l = ijfe_l.x;
+	float j_l = ijfe_l.y;
+	float f_l = ijfe_l.z;
+	float e_l = ijfe_l.w;
+	float k_l = klhg_l.x;
+	float l_l = klhg_l.y;
+	float h_l = klhg_l.z;
+	float g_l = klhg_l.w;
+	float o_l = zzon_l.z;
+	float n_l = zzon_l.w;
+
+	vec2 direction = vec2(0.0);
+	float edge_length = 0.0;
+	easu_set(direction, edge_length, fractional_position, bvec4(true, false, false, false), b_l, e_l, f_l, g_l, j_l);
+	easu_set(direction, edge_length, fractional_position, bvec4(false, true, false, false), c_l, f_l, g_l, h_l, k_l);
+	easu_set(direction, edge_length, fractional_position, bvec4(false, false, true, false), f_l, i_l, j_l, k_l, n_l);
+	easu_set(direction, edge_length, fractional_position, bvec4(false, false, false, true), g_l, j_l, k_l, l_l, o_l);
+
+	float direction_squared = dot(direction, direction);
+	if (direction_squared < (1.0 / 32768.0))
+		direction = vec2(1.0, 0.0);
+	else
+		direction *= inversesqrt(direction_squared);
+
+	edge_length = 0.5 * edge_length;
+	edge_length *= edge_length;
+	float stretch = dot(direction, direction) / max(abs(direction.x), abs(direction.y));
+	vec2 length_scale = vec2(1.0 + (stretch - 1.0) * edge_length, 1.0 - 0.5 * edge_length);
+	float lobe = 0.5 + ((1.0 / 4.0 - 0.04) - 0.5) * edge_length;
+	float clipping_point = 1.0 / lobe;
+
+	vec3 min4 = min(min(vec3(ijfe_r.z, ijfe_g.z, ijfe_b.z), vec3(klhg_r.w, klhg_g.w, klhg_b.w)),
+	                min(vec3(ijfe_r.y, ijfe_g.y, ijfe_b.y), vec3(klhg_r.x, klhg_g.x, klhg_b.x)));
+	vec3 max4 = max(max(vec3(ijfe_r.z, ijfe_g.z, ijfe_b.z), vec3(klhg_r.w, klhg_g.w, klhg_b.w)),
+	                max(vec3(ijfe_r.y, ijfe_g.y, ijfe_b.y), vec3(klhg_r.x, klhg_g.x, klhg_b.x)));
+
+	vec3 accumulated_color = vec3(0.0);
+	float accumulated_weight = 0.0;
+	easu_tap(accumulated_color, accumulated_weight, vec2(0.0, -1.0) - fractional_position, direction, length_scale, lobe, clipping_point, vec3(bczz_r.x, bczz_g.x, bczz_b.x));
+	easu_tap(accumulated_color, accumulated_weight, vec2(1.0, -1.0) - fractional_position, direction, length_scale, lobe, clipping_point, vec3(bczz_r.y, bczz_g.y, bczz_b.y));
+	easu_tap(accumulated_color, accumulated_weight, vec2(-1.0, 1.0) - fractional_position, direction, length_scale, lobe, clipping_point, vec3(ijfe_r.x, ijfe_g.x, ijfe_b.x));
+	easu_tap(accumulated_color, accumulated_weight, vec2(0.0, 1.0) - fractional_position, direction, length_scale, lobe, clipping_point, vec3(ijfe_r.y, ijfe_g.y, ijfe_b.y));
+	easu_tap(accumulated_color, accumulated_weight, vec2(0.0, 0.0) - fractional_position, direction, length_scale, lobe, clipping_point, vec3(ijfe_r.z, ijfe_g.z, ijfe_b.z));
+	easu_tap(accumulated_color, accumulated_weight, vec2(-1.0, 0.0) - fractional_position, direction, length_scale, lobe, clipping_point, vec3(ijfe_r.w, ijfe_g.w, ijfe_b.w));
+	easu_tap(accumulated_color, accumulated_weight, vec2(1.0, 1.0) - fractional_position, direction, length_scale, lobe, clipping_point, vec3(klhg_r.x, klhg_g.x, klhg_b.x));
+	easu_tap(accumulated_color, accumulated_weight, vec2(2.0, 1.0) - fractional_position, direction, length_scale, lobe, clipping_point, vec3(klhg_r.y, klhg_g.y, klhg_b.y));
+	easu_tap(accumulated_color, accumulated_weight, vec2(2.0, 0.0) - fractional_position, direction, length_scale, lobe, clipping_point, vec3(klhg_r.z, klhg_g.z, klhg_b.z));
+	easu_tap(accumulated_color, accumulated_weight, vec2(1.0, 0.0) - fractional_position, direction, length_scale, lobe, clipping_point, vec3(klhg_r.w, klhg_g.w, klhg_b.w));
+	easu_tap(accumulated_color, accumulated_weight, vec2(1.0, 2.0) - fractional_position, direction, length_scale, lobe, clipping_point, vec3(zzon_r.z, zzon_g.z, zzon_b.z));
+	easu_tap(accumulated_color, accumulated_weight, vec2(0.0, 2.0) - fractional_position, direction, length_scale, lobe, clipping_point, vec3(zzon_r.w, zzon_g.w, zzon_b.w));
+
+	vec3 color = clamp(accumulated_color / accumulated_weight, min4, max4);
+	vec2 alpha_uv = (position + vec2(0.5)) * pc.con1.xy;
+	float alpha = textureLod(source_color, alpha_uv, 0.0).a;
+	imageStore(destination_color, pc.output_offset + ivec2(output_pixel), vec4(color, alpha));
+}

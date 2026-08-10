@@ -68,6 +68,7 @@ public:
 	        const xrt_rect & min_size);
 
 	std::array<vk::ImageView, 2> get_views();
+	std::array<vk::ImageView, 2> get_unorm_views();
 	vk::Image get_image()
 	{
 		return render_target;

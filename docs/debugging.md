@@ -9,6 +9,7 @@ This guide covers debugging techniques for WiVRn, including log collection, cras
   - [HMD Client Logs](#hmd-client-logs)
   - [Server Logs](#server-logs)
 - [Connection Lifecycle](#connection-lifecycle)
+- [FSR 1 spatial upscaling](#fsr-1-spatial-upscaling)
 - [Virtual Body Trackers](#virtual-body-trackers)
 - [Starting Components for Debugging](#starting-components-for-debugging)
   - [HMD Client](#hmd-client)
@@ -51,7 +52,7 @@ application data while testing reconnection of an existing PC session. Install
 the matching APK in place instead:
 
 ```bash
-adb install -r build/outputs/apk/debug/WiVRn-fsr-debug.apk
+adb install -r build/outputs/apk/debug/WiVRn-fsr-spatial-debug.apk
 ```
 
 Use the clean-install procedure only before starting a new session or when a
@@ -214,6 +215,32 @@ Its interactive commands include `drop tcp on`, `drop udp on`, `drop both on`, `
 `close tcp`, `status`, and the corresponding `off` commands. `--close-tcp-after BYTES` closes a
 connection during its handshake. Restarting it with `--upstream-bind ADDRESS` permits testing a
 new source address while keeping the resume token and paired headset identity unchanged.
+
+---
+
+## FSR 1 spatial upscaling
+
+Run the local server with `XRT_LOG=info` so the backend markers are visible.
+For the FSR-only path, the important sequence is:
+
+```text
+FSR 1 spatial upscaling enabled: EASU ... -> ... per eye, RCAS sharpness=... stops
+```
+
+Interpret common failures as follows:
+
+| Marker | Meaning |
+| --- | --- |
+| `FSR 1 ... requested with unsupported dimensions` | Render resolution is 100%, a dimension is invalid, or the request exceeds the 4x output-area limit. |
+| `Cannot initialize FSR 1 ... using normal composition` | EASU/RCAS Vulkan resources failed; the compositor keeps the normal complete-frame path. |
+| Headset runs below the selected refresh rate | Application SpaceWarp or another headset rate divider may be active; disable it for the FSR A/B test. |
+| Black screen or cadence changes | Disable FSR, reconnect, and verify the control path before collecting Vulkan validation output. |
+| Server `90Hz`, client `100Hz` | The headset APK does not match this server build. |
+
+After a reconnect, there must be no temporal FSR state to restore: the encoder
+resets, emits a fresh IDR, and EASU/RCAS processes the next complete frame.
+See [fsr-spatial.md](fsr-spatial.md) for the exact procedure
+and stability checklist.
 
 ---
 
@@ -463,6 +490,7 @@ The log is located at `$XDG_STATE_HOME/xrizer/xrizer.txt`, or `$HOME/.local/stat
 | `XRT_LOG` | Log level (`trace`, `debug`, `info`, `warn`, `error`) | `warn` |
 | `XRT_COMPOSITOR_LOG` | Compositor log level (`trace`, `debug`, `info`, `warn`, `error`) | `info` |
 | `OXR_VIEWPORT_SCALE_PERCENTAGE` | Per-application viewport scale (set on application, not server) | `100` |
+| `WIVRN_FSR_SHARPNESS` | RCAS sharpness in stops (`0` strongest, range `0`–`2`) | `0.2` |
 
 ### Debugging
 

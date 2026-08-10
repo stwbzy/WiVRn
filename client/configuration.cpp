@@ -317,6 +317,7 @@ const std::vector<config_field> & configuration::config_fields()
 {
 	static const std::vector<config_field> fields = {
 	        scalar("resolution_scale", &configuration::resolution_scale),
+	        scalar("fsr_upscaling", &configuration::fsr_upscaling),
 	        scalar("bitrate_bps", &configuration::bitrate_bps),
 	        scalar("enable_stream_gui", &configuration::enable_stream_gui),
 	        scalar("app_list_view", &configuration::app_list_view),

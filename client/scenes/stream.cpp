@@ -241,6 +241,8 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 			auto view = self->system.view_configuration_views(self->viewconfig)[0];
 			view = application::get_hmd_traits().override_view(view);
 
+			info.native_eye_width = view.recommendedImageRectWidth;
+			info.native_eye_height = view.recommendedImageRectHeight;
 			info.render_eye_width = view.recommendedImageRectWidth * config.resolution_scale;
 			info.render_eye_height = view.recommendedImageRectHeight * config.resolution_scale;
 		}
@@ -250,6 +252,7 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 			info.stream_eye_width = info.render_eye_width * scale;
 			info.stream_eye_height = info.render_eye_height * scale;
 		}
+		info.fsr_upscaling = config.use_fsr_upscaling();
 
 		if (self->instance.has_extension(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME))
 		{

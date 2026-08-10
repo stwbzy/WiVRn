@@ -26,6 +26,7 @@
 
 #include "encoder/encoder_settings.h"
 #include "foveation.h"
+#include "fsr_upscaler.h"
 #include "layer_squasher.h"
 #include "pacer.h"
 #include "utils/wivrn_vk_bundle.h"
@@ -36,6 +37,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 namespace wivrn
@@ -96,6 +98,7 @@ private:
 	wivrn::pacer pacer;
 
 	layer_squasher squasher;
+	std::optional<wivrn::fsr_upscaler> spatial_upscaler;
 	wivrn::foveation foveation;
 
 	std::array<std::unique_ptr<video_encoder>, 3> encoders;
@@ -117,14 +120,6 @@ private:
 		comp_frame waited{.id = -1};
 		comp_frame rendering{.id = -1};
 	} frame;
-
-	struct
-	{
-		bool requested = false;
-		bool reported = false;
-		bool last_inputs_ready = false;
-		uint64_t frames = 0;
-	} frame_generation_probe;
 
 	xrt_result_t begin_session(const xrt_begin_session_info * info)
 	{
@@ -155,7 +150,6 @@ private:
 	};
 
 	xrt_result_t layer_commit(xrt_graphics_sync_handle_t sync_handle);
-	void inspect_frame_generation_inputs();
 
 	xrt_result_t get_display_refresh_rate(float * out_display_refresh_rate_hz);
 

@@ -306,10 +306,19 @@ struct settings_changed
 
 struct headset_info_packet
 {
+	// Recommended per-eye size reported by the headset runtime before the
+	// user's render-resolution scale is applied. Spatial upscalers use this as
+	// their reconstruction target while OpenXR applications keep rendering at
+	// render_eye_width/render_eye_height.
+	uint16_t native_eye_width;
+	uint16_t native_eye_height;
 	uint16_t render_eye_width;
 	uint16_t render_eye_height;
 	uint16_t stream_eye_width;
 	uint16_t stream_eye_height;
+	// Reconstruct the composed render image to the native per-eye size with
+	// FSR 1 before applying the existing foveated encoder transform.
+	bool fsr_upscaling = false;
 	std::vector<float> available_refresh_rates;
 
 	// runtime configurable settings
