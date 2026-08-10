@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cassert>
+#include <cerrno>
 #include <memory>
 #include <netdb.h>
 #include <netinet/ip.h>
@@ -37,6 +38,18 @@
 
 thread_local crypto::encrypt_context wivrn::UDP::encrypter{EVP_aes_128_ctr()};
 std::atomic<uint64_t> wivrn::UDP::iv_counter;
+
+namespace
+{
+bool should_drop_udp_packet(int error)
+{
+	// UDP carries real-time video, tracking and heartbeat datagrams. Once the
+	// kernel queue is full, waiting for old data is worse than dropping the
+	// current datagram: a blocking send can otherwise freeze reconnection and
+	// even prevent the process from shutting down.
+	return error == EAGAIN || error == EWOULDBLOCK || error == ENOBUFS;
+}
+} // namespace
 
 const char * wivrn::invalid_packet::what() const noexcept
 {
@@ -391,8 +404,14 @@ size_t wivrn::UDP::send_raw(serialization_packet && packet)
 	for (const auto & span: data)
 		iovecs.emplace_back(span.data(), span.size());
 
-	if (ssize_t sent = ::writev(fd, iovecs.data(), iovecs.size()); sent >= 0)
+	msghdr message{
+	        .msg_iov = iovecs.data(),
+	        .msg_iovlen = iovecs.size(),
+	};
+	if (ssize_t sent = ::sendmsg(fd, &message, MSG_DONTWAIT); sent >= 0)
 		return sent;
+	if (should_drop_udp_packet(errno))
+		return 0;
 	throw std::system_error{errno, std::generic_category()};
 }
 
@@ -448,9 +467,15 @@ size_t wivrn::UDP::send_many_raw(std::span<serialization_packet> packets)
 		j += mmsgs[i].msg_hdr.msg_iovlen;
 	}
 
-	// sendmmsg may not send all messages, just consider them as lost for UDP
-	if (sendmmsg(fd, mmsgs.data(), mmsgs.size(), 0) < 0)
+	// sendmmsg may not send all messages; missing real-time datagrams are
+	// deliberately considered lost. Never let queue pressure block the
+	// compositor or the connection heartbeat thread.
+	if (sendmmsg(fd, mmsgs.data(), mmsgs.size(), MSG_DONTWAIT) < 0)
+	{
+		if (should_drop_udp_packet(errno))
+			return 0;
 		throw std::system_error{errno, std::generic_category()};
+	}
 	return sent;
 }
 
