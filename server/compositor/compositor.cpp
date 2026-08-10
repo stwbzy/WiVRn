@@ -2046,13 +2046,17 @@ compositor::compositor(wivrn_session & session) :
 	}
 
 	const char * frame_generation_env = std::getenv("WIVRN_FSR_FRAME_GENERATION");
-	frame_generation_probe.requested = debug_get_bool_option_fsr_frame_generation();
-	frame_generation_probe.handoff_requested = debug_get_bool_option_fsr_frame_generation_handoff();
-	frame_generation_probe.double_rate_requested = debug_get_bool_option_fsr_frame_generation_double_rate();
-	frame_generation_probe.color_only_requested = debug_get_bool_option_fsr_frame_generation_color_only();
-	U_LOG_IFL_I(log_level, "FSR frame-generation option: env=%s parsed=%u", frame_generation_env != nullptr ? frame_generation_env : "<unset>", frame_generation_probe.requested);
-	if (frame_generation_probe.requested)
+	const bool frame_generation_requested = debug_get_bool_option_fsr_frame_generation();
+	if (frame_generation_requested && !fsr_frame_generation_enabled())
+		U_LOG_IFL_W(log_level,
+		            "FSR frame generation is disabled in this build; ignoring WIVRN_FSR_FRAME_GENERATION=%s",
+		            frame_generation_env != nullptr ? frame_generation_env : "<unset>");
+	if (fsr_frame_generation_enabled() && frame_generation_requested)
 	{
+		frame_generation_probe.requested = true;
+		frame_generation_probe.handoff_requested = debug_get_bool_option_fsr_frame_generation_handoff();
+		frame_generation_probe.double_rate_requested = debug_get_bool_option_fsr_frame_generation_double_rate();
+		frame_generation_probe.color_only_requested = debug_get_bool_option_fsr_frame_generation_color_only();
 		try
 		{
 			const auto extent = render_extent(session.get_info());

@@ -49,6 +49,8 @@ option(WIVRN_BUILD_TEST "Build test binaries" OFF)
 option(WIVRN_WERROR "Treat warnings as errors" OFF)
 option(WIVRN_OPTIMIZE_SHADERS "Run spirv-opt on compiled shaders" ON)
 option(WIVRN_DEBUG_SHADERS "Compile shaders with debug information" OFF)
+option(WIVRN_ENABLE_EXPERIMENTAL_FRAME_GENERATION
+	"Enable the unstable WiVRn frame-generation compositor path" OFF)
 
 if(WIVRN_BUILD_TEST)
     enable_testing()

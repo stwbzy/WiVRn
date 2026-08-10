@@ -21,6 +21,9 @@ void check(bool condition)
 
 int main()
 {
+	setenv("WIVRN_FSR_FRAME_GENERATION", "1", 1);
+	check(!wivrn::fsr_frame_generation_enabled());
+
 	setenv("WIVRN_FSR_UPSCALING", "1", 1);
 	setenv("WIVRN_FSR_SHARPNESS", "0.4", 1);
 

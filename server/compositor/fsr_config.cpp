@@ -32,6 +32,15 @@ bool fsr_upscaling_requested()
 	return enabled;
 }
 
+bool fsr_frame_generation_enabled()
+{
+	// Keep the unstable synthesis path opt-in at build time. Runtime frame
+	// generation variables are intentionally ignored by the default build so a
+	// stale launch command cannot switch the compositor into the black-screen
+	// path while the implementation is being repaired.
+	return WIVRN_ENABLE_EXPERIMENTAL_FRAME_GENERATION != 0;
+}
+
 float fsr_rcas_sharpness_stops()
 {
 	static const float stops = [] {

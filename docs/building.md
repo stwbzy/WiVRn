@@ -50,7 +50,7 @@ To also instrument Monado under the same switch, use the `server-tracing-monado`
 
 See [profiling](profiling.md) for how to run the server with tracing and capture/analyse traces.
 
-## Experimental FSR 1 + Frame Generation build
+## Stable FSR 1 spatial-upscaling build
 
 Use the reproducible server preset and keep the generated runtime in the build
 tree:
@@ -58,44 +58,35 @@ tree:
 ```bash
 cmake --preset server-no-system-boost \
   -DWIVRN_BUILD_TEST=ON \
+  -DWIVRN_ENABLE_EXPERIMENTAL_FRAME_GENERATION=OFF \
   -DEigen3_DIR=/home/stwby/Proyectos/deps/eigen-install/share/eigen3/cmake \
   -DCMAKE_PREFIX_PATH=/home/stwby/Proyectos/deps/local
 cmake --build build-server-no-system-boost -j2
 ```
 
-Build the matching Android client as well. Double-rate decoding depends on the
-advertised stream rate, so an APK from another source revision is not a valid
-test client:
+Build the matching Android client as well. The APK and server should still
+come from the same source revision because the connection protocol is paired:
 
 ```bash
 ANDROID_HOME=/home/stwby/Android ./gradlew assembleDebug
 adb install -r build/outputs/apk/debug/WiVRn-fsr-debug.apk
 ```
 
-To combine FSR 1 spatial reconstruction with the color-only 45-to-90 path,
-first set the headset **Render resolution** to 70–85%, disable headset
-**Application SpaceWarp**, disconnect, then use:
+Set the headset **Render resolution** to 70–85%, reconnect, and use FSR spatial
+upscaling only:
 
 ```bash
 XRT_PRINT_OPTIONS=1 XRT_LOG=info \
 WIVRN_FSR_UPSCALING=1 \
 WIVRN_FSR_SHARPNESS=0.2 \
-WIVRN_FSR_FRAME_GENERATION=1 \
-WIVRN_FSR_FRAME_GENERATION_COLOR_ONLY=1 \
-WIVRN_FSR_FRAME_GENERATION_HANDOFF=1 \
-WIVRN_FSR_FRAME_GENERATION_DOUBLE_RATE=1 \
 build-server-no-system-boost/server/wivrn-server \
   --no-fork --early-active-runtime
 ```
 
-This is not AMD FidelityFX FSR 3. It combines a 32-bit Vulkan port of AMD FSR 1
-EASU/RCAS with WiVRn's experimental pose-compensated
-color-history/optical-flow frame generator. See
-[fsr-frame-generation.md](fsr-frame-generation.md) for each switch, expected
-logs, fallback behavior, and the physical revalidation checklist.
-
-For an FSR-only smoke test, omit every `WIVRN_FSR_FRAME_GENERATION_*` variable
-and keep only `WIVRN_FSR_UPSCALING=1` plus the optional sharpness value.
+This is not AMD FidelityFX FSR 3: it is a 32-bit Vulkan port of AMD FSR 1
+EASU/RCAS. The old `WIVRN_FSR_FRAME_GENERATION_*` variables are ignored by the
+default build. See [fsr-frame-generation.md](fsr-frame-generation.md) for the
+FSR-only smoke test, expected logs and stability checklist.
 
 ### OpenXR diagnostic harness
 
@@ -110,10 +101,11 @@ XR_RUNTIME_JSON="$PWD/build-server-no-system-boost/openxr_wivrn-dev.json" \
   --normal --frames 1
 ```
 
-Use `--normal --visual-pattern` to exercise the color-only condition used by
-VRChat/OpenComposite. Use `--frame-synthesis` or `--space-warp` to submit the
-corresponding per-view metadata. The harness remains a diagnostic application;
-it does not replace visual and long-duration testing in a real game.
+Use `--normal --visual-pattern` to exercise the normal composition condition
+used by VRChat/OpenComposite. The frame-synthesis and space-warp harness modes
+are reserved for future frame-generation work. The harness remains a
+diagnostic application; it does not replace visual and long-duration testing
+in a real game.
 
 Always pair the build-tree OpenXR manifest and harness with the server from the
 same build directory. Do not use `IPC_IGNORE_VERSION=1` to bridge an installed

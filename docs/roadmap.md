@@ -1,9 +1,9 @@
-# FSR 1 spatial upscaling, frame generation, and connection-stability roadmap
+# FSR 1 spatial upscaling and connection-stability roadmap
 
 Status date: 2026-08-10.
 
 The fork keeps VRChat, OpenComposite, and game binaries unmodified. The
-runtime/compositor owns experimental frame generation. Connection lifecycle
+runtime/compositor owns the opt-in FSR 1 spatial path. Connection lifecycle
 work applies generally to supported headsets and applications.
 
 ## Completed: structural frame-synthesis path
@@ -58,58 +58,52 @@ described below.
 See [connection-lifecycle.md](connection-lifecycle.md) for the normative
 behavior and [debugging.md](debugging.md#connection-lifecycle) for diagnostics.
 
-## Completed locally: experimental 45-to-90 backend port
+## Deferred: experimental frame-generation backend
 
-- Ported the earlier persistent stereo history and Vulkan compute candidate
-  backend to the current compositor.
-- Added a pose-compensated color-only fallback with confidence-gated residual
-  optical flow for projection-only applications.
-- Added guarded candidate handoff and double-rate candidate/application
-  transport. A 90 Hz headset paces the application at 45 Hz while keeping the
-  encoded stream at 90 Hz.
-- Correlated Android MediaCodec timestamps with the advertised video rate.
-- Reset history, flow, pose, pacing, queued frames and encoder state across the
-  current pause/reconnect lifecycle.
-- Derived even/odd stream IDs from the OpenXR frame ID so post-resume feedback
-  cannot alias a pre-pause pacer entry.
+- The earlier persistent stereo history, optical-flow candidate and 45-to-90
+  transport remain isolated in source for future repair.
+- The default CMake build sets
+  `WIVRN_ENABLE_EXPERIMENTAL_FRAME_GENERATION=OFF`; stale runtime variables
+  cannot activate the path.
+- Before re-enabling it, fix image-layout ownership, candidate lifetime,
+  double-rate pacing, decoder timestamps and reconnect reset ordering.
+
+## Completed locally: stable FSR 1 spatial path
+
+- Added a 32-bit Vulkan FSR 1 EASU pass followed by RCAS before WiVRn
+  foveation/encoding.
 - Added explicit negotiation of the headset's unscaled recommended resolution.
-- Added a 32-bit Vulkan FSR 1 EASU pass followed by RCAS, before WiVRn
-  foveation/encoding, with matching processing for real and generated frames.
+- Kept FSR spatial processing stateless across pause and reconnect.
 - Built the server and matching Android debug APK, validated both FSR shaders
   as Vulkan 1.3 SPIR-V, verified APK v2 signing, and passed both local tests
   (`connection-lifecycle` and `fsr-config`).
 
 This backend is not AMD FidelityFX FSR 3. Spatial upscaling uses AMD's
-open-source FSR 1 EASU/RCAS algorithm; frame generation remains an experimental
-WiVRn color-reprojection/optical-flow implementation.
+open-source FSR 1 EASU/RCAS algorithm. The deferred frame-generation code is
+not part of the default runtime.
 
-The active backend should produce markers equivalent to:
+The active FSR path should produce a marker equivalent to:
 
 ```text
 FSR 1 spatial upscaling enabled: EASU ... -> ... per eye, RCAS sharpness=... stops
-FSR frame-generation candidate dispatched: mode=pose-compensated-color-only
-FSR frame-generation candidate handed off to foveation and encoder; diagnostic double-rate mode
-FSR double-rate pair submitted: candidate_frame=0 application_frame=1
 ```
 
 ## Current phase: physical revalidation and hardening
 
-1. Install the matching APK and confirm visual 45-to-90 output on Quest with
-   the current port; also validate 60-to-120 with headset Application SpaceWarp
-   disabled.
+1. Install the matching APK and compare the FSR-only path against native
+   resolution on Quest without changing application cadence.
 2. Automated fault-proxy matrix: TCP-only, UDP-only, combined cuts, delay,
    handshake closure, address change, incompatible headset, and server shutdown
    from every state.
-3. Visual and cadence comparison with frame generation disabled and enabled,
-   and with FSR 1 disabled and enabled, including fine text, rotation,
-   translation, disocclusion and transparent content.
+3. Visual comparison with FSR 1 disabled and enabled, including fine text,
+   rotation, translation, disocclusion and transparent content.
 4. VRChat smoke tests without game-specific hooks or binary changes.
 5. Add counters for generated frames, backend fallbacks and pacing misses.
 6. Physical release gate: two hours, twenty Wi-Fi cuts, twenty voluntary
    disconnects, no native crash, orphan thread, retained lock, or persistent
    MediaCodec failure.
-7. Revisit the headset protocol only if generated-frame presentation timing
-   requires information not already available on the PC.
+7. Revisit the frame-generation backend only after the FSR-only path passes the
+   stability gate and the dedicated synthesis tests are restored.
 
 ## Safety constraints
 

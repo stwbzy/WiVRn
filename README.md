@@ -23,20 +23,19 @@ and OpenXR applications.
 - **Refreshed headset UI:** clearer streaming and reconnection states, a safe
   local recovery panel with a countdown, improved settings, and functional
   virtual full-body tracker selection on Quest.
-- **Experimental frame generation:** stereo color history, pose compensation,
-  residual optical flow, and synchronized 45-to-90 candidate/application
-  transport, plus metadata support for `XR_FB_space_warp` and
-  `XR_EXT_frame_synthesis`.
+- **Frame generation paused:** the former stereo color-history and 45-to-90
+  path remains isolated for future repair and is disabled in the default
+  build, so old frame-generation environment variables cannot affect a stable
+  session.
 - **FSR 1 image reconstruction:** an opt-in two-pass FidelityFX EASU + RCAS
   path reconstructs a reduced application render to the headset's recommended
-  per-eye resolution before WiVRn foveation and encoding. It can be combined
-  with the frame-generation path above.
+  per-eye resolution before WiVRn foveation and encoding.
 
 > [!NOTE]
 > This fork does not embed AMD FidelityFX FSR 3. Spatial reconstruction is a
-> 32-bit Vulkan port of the open-source FSR 1 EASU/RCAS algorithms; frame
-> generation remains WiVRn's experimental pose-reprojection/optical-flow
-> backend. Both are opt-in and retain normal composition as a safe fallback.
+> 32-bit Vulkan port of the open-source FSR 1 EASU/RCAS algorithms. Frame
+> generation is currently disabled in the default build while its black-screen
+> and cadence issues are repaired.
 
 See the [connection lifecycle](docs/connection-lifecycle.md),
 [Space Warp and FSR technical status](docs/fsr-frame-generation.md), and
@@ -168,24 +167,18 @@ The same overrides should work for other VR applications distributed as Flatpaks
 
 See [building](docs/building.md) for building the [dashboard](docs/building.md#dashboard), [server (PC)](docs/building.md#server-pc), and [client (headset)](docs/building.md#client-headset)
 
-## Experimental FSR 1 and frame-generation fork
+## Experimental FSR 1 spatial-upscaling fork
 
-This checkout restores the earlier opt-in WiVRn Vulkan candidate backend on
-top of the current deterministic connection lifecycle. It keeps a stereo color
-history, applies midpoint head-pose compensation and confidence-gated residual
-optical flow, then can send candidate/application pairs at the headset refresh
-rate. At 90 Hz, the application is paced at 45 Hz and the encoded stream stays
-at 90 Hz.
-
-The branch also contains a separate AMD FidelityFX FSR 1 spatial path: EASU
+This checkout contains an AMD FidelityFX FSR 1 spatial path: EASU
 reconstructs a reduced render to the headset's recommended resolution and
 RCAS sharpens it before WiVRn foveation/encoding. It is not FSR 3. The PC
-server and matching Android client compile locally, both FSR shaders validate
-for Vulkan 1.3, and both local tests pass. The combined path is awaiting a
-fresh physical Quest visual/stability run. Disable the headset's own
-Application SpaceWarp when testing server double-rate generation. Commands,
-expected logs, limitations, and the revalidation checklist are in
+server compiles with `WIVRN_ENABLE_EXPERIMENTAL_FRAME_GENERATION=OFF` by
+default, both FSR shaders validate for Vulkan 1.3, and both local unit tests
+pass. Commands, expected logs, limitations, and the stability checklist are in
 [docs/fsr-frame-generation.md](docs/fsr-frame-generation.md).
+
+The former frame-generation implementation remains in the source tree for
+future repair, but its runtime environment variables are ignored by default.
 
 The same branch also contains the deterministic connection lifecycle described
 in [docs/connection-lifecycle.md](docs/connection-lifecycle.md). See the

@@ -143,7 +143,9 @@ if (WIVRN_BUILD_SERVER)
 			utils/gpu_timestamp_pool.cpp
 		)
 	target_compile_features(wivrn-server PRIVATE cxx_std_20)
-	target_compile_definitions(wivrn-server PRIVATE VULKAN_HPP_NO_CONSTRUCTORS)
+	target_compile_definitions(wivrn-server PRIVATE
+		VULKAN_HPP_NO_CONSTRUCTORS
+		WIVRN_ENABLE_EXPERIMENTAL_FRAME_GENERATION=$<BOOL:${WIVRN_ENABLE_EXPERIMENTAL_FRAME_GENERATION}>)
 
 	target_include_directories(wivrn-server SYSTEM PRIVATE ${monado_SOURCE_DIR}/src/xrt/compositor/)
 	target_include_directories(wivrn-server PRIVATE .)

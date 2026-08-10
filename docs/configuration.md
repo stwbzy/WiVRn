@@ -199,22 +199,21 @@ Default value: unset
 
 If set, overrides the name displayed in the server list.
 
-## Experimental FSR compositor switches
+## FSR 1 spatial upscaling
 
-FSR 1 and frame generation are deliberately not persisted in the public JSON
-configuration yet. Start the local server with environment variables while
-they remain experimental:
+FSR 1 is deliberately not persisted in the public JSON configuration. Start
+the local server with environment variables:
 
 - `WIVRN_FSR_UPSCALING=1` enables EASU + RCAS from the reduced headset render
   resolution to its original recommended resolution.
 - `WIVRN_FSR_SHARPNESS=0.2` selects RCAS sharpness in stops (`0` strongest,
   accepted range `0`–`2`).
-- `WIVRN_FSR_FRAME_GENERATION=1` and the related switches enable the separate
-  SpaceWarp candidate path.
+- The `WIVRN_FSR_FRAME_GENERATION_*` variables are ignored by the default
+  build. Frame generation is paused while its black-screen and cadence issues
+  are repaired.
 
 Set **Render resolution** in the headset UI to 70–85% before connecting;
-FSR spatial reconstruction is inactive at 100%. Disable headset **Application
-SpaceWarp** when enabling server double-rate generation, otherwise both
-features halve the application rate. See
-[fsr-frame-generation.md](fsr-frame-generation.md) for the complete combined
-command and expected logs.
+FSR spatial reconstruction is inactive at 100%. Do not enable headset
+Application SpaceWarp for this FSR-only test. See
+[fsr-frame-generation.md](fsr-frame-generation.md) for the command and
+expected logs.
