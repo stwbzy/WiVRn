@@ -8,6 +8,37 @@
 <p align="center"><img src="images/wivrn.svg" width="180"></p>
 <h3 align="center">Fully FOSS PCVR streamer</h3>
 
+## About this enhanced fork
+
+This branch is an experimental WiVRn fork focused on a smoother and more
+resilient PCVR experience while remaining compatible with multiple headsets
+and OpenXR applications.
+
+### Highlights
+
+- **General improvements:** deterministic connection states, clean voluntary
+  disconnects, a 30-second automatic reconnection window, safer audio and
+  compositor cleanup, and protection against stale packets from an older
+  connection.
+- **Refreshed headset UI:** clearer streaming and reconnection states, a safe
+  local recovery panel with a countdown, improved settings, and functional
+  virtual full-body tracker selection on Quest.
+- **Experimental Space Warp:** validation and transport of stereo color,
+  depth, and motion-vector metadata for `XR_FB_space_warp` and
+  `XR_EXT_frame_synthesis`, including diagnostic tools and safe fallback to
+  normal composition.
+- **FSR experimentation:** groundwork and diagnostics for runtime-owned AMD
+  FSR3 integration without modifying VRChat or other game binaries.
+
+> [!NOTE]
+> The Space Warp/frame-synthesis metadata path is implemented, but the final
+> Vulkan image-generation backend is still experimental. When its inputs or
+> backend are unavailable, WiVRn deliberately retains normal composition.
+
+See the [connection lifecycle](docs/connection-lifecycle.md),
+[Space Warp and FSR technical status](docs/fsr-frame-generation.md), and
+[project roadmap](docs/roadmap.md) for details.
+
 # About
 
 WiVRn is an application that wirelessly streams a virtual reality game to a standalone VR headset from a <b>Linux</b> computer.
@@ -156,8 +187,7 @@ FSR milestone is a real Vulkan/FSR3 backend, synchronization, and frame pacing.
 
 The same branch also contains the deterministic connection lifecycle described
 in [docs/connection-lifecycle.md](docs/connection-lifecycle.md). See the
-[current handoff](docs/handoff.md) and [roadmap](docs/roadmap.md) before further
-runtime work.
+[roadmap](docs/roadmap.md) before further runtime work.
 
 
 # Configuration
