@@ -179,14 +179,14 @@ buffer_allocation make_ubo(vk::raii::Device & device, int i)
 	        std::format("layer squasher UBO {}", i)};
 }
 
-vk::raii::ImageView make_view(wivrn::vk_bundle & vk, image_allocation & image, vk::ImageUsageFlagBits flag, uint32_t view)
+vk::raii::ImageView make_view(wivrn::vk_bundle & vk, image_allocation & image, vk::ImageUsageFlags usage, uint32_t view)
 {
 	vk::raii::ImageView res{vk.device,
 	                        vk::StructureChain{
 	                                vk::ImageViewCreateInfo{
 	                                        .image = image,
 	                                        .viewType = vk::ImageViewType::e2D,
-	                                        .format = flag == vk::ImageUsageFlagBits::eSampled ? formats[0] : formats[1],
+	                                        .format = usage & vk::ImageUsageFlagBits::eStorage ? formats[1] : formats[0],
 	                                        .subresourceRange = {
 	                                                .aspectMask = vk::ImageAspectFlagBits::eColor,
 	                                                .levelCount = 1,
@@ -195,7 +195,7 @@ vk::raii::ImageView make_view(wivrn::vk_bundle & vk, image_allocation & image, v
 	                                        },
 	                                },
 	                                vk::ImageViewUsageCreateInfo{
-	                                        .usage = flag,
+	                                        .usage = usage,
 	                                },
 
 	                        }
@@ -365,7 +365,7 @@ layer_squasher::layer_squasher(vk_bundle & vk, vk::Extent3D target_size) :
                       },
                       "layer squasher target"},
         render_view_srgb{make_view(vk, render_target, vk::ImageUsageFlagBits::eSampled, 0), make_view(vk, render_target, vk::ImageUsageFlagBits::eSampled, 1)},
-        render_view_unorm{make_view(vk, render_target, vk::ImageUsageFlagBits::eStorage, 0), make_view(vk, render_target, vk::ImageUsageFlagBits::eStorage, 1)},
+		render_view_unorm{make_view(vk, render_target, vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eStorage, 0), make_view(vk, render_target, vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eStorage, 1)},
         ds_layout{make_ds_layout(vk, image_array_size, partially_bound_desc)},
         layout{make_layout(vk, *ds_layout)},
         pipeline{make_pipeline(vk, image_array_size, *layout)},
