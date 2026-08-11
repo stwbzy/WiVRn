@@ -21,8 +21,10 @@
 #include "xrt/xrt_device.h"
 
 #include "history.h"
+#include "virtual_tracker_dropout_filter.h"
 
 #include <atomic>
+#include <mutex>
 
 namespace wivrn
 {
@@ -31,13 +33,18 @@ struct clock_offset;
 
 class tracker_pose_list : public history<tracker_pose_list, xrt_space_relation>
 {
+	virtual_tracker_dropout_filter dropout_filter;
+	std::mutex update_mutex;
+
 public:
 	xrt_space_relation interpolate(const xrt_space_relation & a, const xrt_space_relation & b, float t);
 	xrt_space_relation extrapolate(const xrt_space_relation & a, const xrt_space_relation & b, int64_t ta, int64_t tb, int64_t t);
 
 	tracker_pose_list() = default;
 
-	void update_tracking(XrTime produced_timestamp, XrTime timestamp, const xrt_space_relation & pose, const clock_offset & offset);
+	virtual_tracker_dropout_filter::result
+	update_tracking(XrTime produced_timestamp, XrTime timestamp, const xrt_space_relation & pose, const clock_offset & offset);
+	void reset_tracking();
 };
 
 class wivrn_generic_tracker : public xrt_device
@@ -47,10 +54,17 @@ class wivrn_generic_tracker : public xrt_device
 
 	wivrn_session & cnx;
 	std::atomic_bool enabled = true;
+	uint64_t invalid_samples_suppressed = 0;
+	uint64_t transient_dropouts = 0;
+	uint64_t sustained_dropouts = 0;
+	uint64_t recoveries = 0;
+	uint64_t reordered_samples = 0;
+	XrDuration maximum_invalid_duration = 0;
 
 public:
 	using base_t = xrt_device;
 	wivrn_generic_tracker(std::string name, xrt_device * hmd, wivrn_session & cnx);
+	~wivrn_generic_tracker();
 
 	xrt_result_t update_inputs();
 	xrt_result_t get_tracked_pose(xrt_input_name name, int64_t at_timestamp_ns, xrt_space_relation * out_relation);
@@ -58,5 +72,6 @@ public:
 	void update_tracking(XrTime produced_timestamp, XrTime timestamp, const xrt_space_relation & pose, const clock_offset & offset);
 
 	void set_enabled(bool enabled);
+	void reset_tracking();
 };
 } // namespace wivrn

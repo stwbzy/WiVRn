@@ -21,6 +21,8 @@
 #include "wivrn_packets.h"
 
 #include "utils/handle.h"
+#include <chrono>
+#include <cstdint>
 #include <openxr/openxr.h>
 
 namespace xr
@@ -37,11 +39,24 @@ class fb_body_tracker : public utils::handle<XrBodyTrackerFB>
 	XrBodyJointSetFB joint_set{};
 	uint32_t last_sent_skeleton_generation = static_cast<uint32_t>(-1);
 	uint32_t skeleton_generation = 0;
+	bool active_state_known = false;
+	bool last_active_state = false;
+	uint64_t locate_failures = 0;
+	uint64_t inactive_samples = 0;
+	uint64_t inactive_periods = 0;
+	std::chrono::steady_clock::time_point inactive_since{};
+	std::chrono::steady_clock::time_point next_failure_log{};
+	std::chrono::nanoseconds maximum_inactive_duration{};
+
+	void update_active_state(bool active);
 
 public:
 	using packet_type = wivrn::from_headset::meta_body;
 
 	fb_body_tracker(instance & inst, session & s, bool full_body);
+	~fb_body_tracker();
+	fb_body_tracker(fb_body_tracker &&) noexcept = default;
+	fb_body_tracker & operator=(fb_body_tracker &&) noexcept = default;
 
 	packet_type locate_spaces(XrTime time, XrSpace reference);
 	bool should_send_skeleton();

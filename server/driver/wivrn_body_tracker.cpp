@@ -417,6 +417,13 @@ void wivrn_body_tracker::update_skeleton(const from_headset::meta_body_skeleton 
 	meta_skeleton_generation++;
 }
 
+void wivrn_body_tracker::reset_tracking()
+{
+	joints_list.reset();
+	for (auto & [_, tracker]: virtual_trackers)
+		tracker.reset_tracking();
+}
+
 void wivrn_body_tracker::operator()(const from_headset::settings_changed & settings)
 {
 	U_LOG_I("Virtual body tracker mask updated: 0x%02x", static_cast<unsigned>(settings.enabled_body_parts));

@@ -77,6 +77,14 @@ protected:
 		add_sample_server_time(produced, t, sample, bool(offset));
 	}
 
+	void replace_sample(XrTime produced_timestamp, XrTime timestamp, const Data & sample, const clock_offset & offset)
+	{
+		TimedData replacement(sample, offset.from_headset(produced_timestamp), offset.from_headset(timestamp));
+		std::lock_guard lock(mutex);
+		data.fill({});
+		data.front() = replacement;
+	}
+
 public:
 	std::pair<XrTime, Data> get_at(XrTime at_timestamp_ns)
 	{

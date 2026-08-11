@@ -301,6 +301,11 @@ if (WIVRN_BUILD_SERVER)
 		target_include_directories(tracking-history-test PRIVATE .)
 		target_link_libraries(tracking-history-test PRIVATE aux_util wivrn-common wivrn-external)
 		add_test(NAME tracking-history COMMAND tracking-history-test)
+
+		add_executable(virtual-tracker-dropout-filter-test driver/virtual_tracker_dropout_filter_test.cpp)
+		target_compile_features(virtual-tracker-dropout-filter-test PRIVATE cxx_std_20)
+		target_include_directories(virtual-tracker-dropout-filter-test PRIVATE .)
+		add_test(NAME virtual-tracker-dropout-filter COMMAND virtual-tracker-dropout-filter-test)
 	endif()
 
 	configure_file(dist/wivrn.service.in wivrn.service)

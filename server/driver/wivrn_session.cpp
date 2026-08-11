@@ -412,6 +412,10 @@ void wivrn_session::pause_session()
 
 	worker_thread = std::jthread();
 	offset_est.reset();
+	if (body_tracker)
+		body_tracker->reset_tracking();
+	for (auto & tracker: generic_trackers)
+		tracker.reset_tracking();
 
 	if (audio_handle)
 	{

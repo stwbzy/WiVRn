@@ -81,6 +81,7 @@ public:
 	void update_tracking(const from_headset::meta_body &, const clock_offset &);
 	void update_tracking(const from_headset::bd_body &, const clock_offset &);
 	void update_skeleton(const from_headset::meta_body_skeleton &);
+	void reset_tracking();
 
 	void operator()(const from_headset::settings_changed & settings);
 };

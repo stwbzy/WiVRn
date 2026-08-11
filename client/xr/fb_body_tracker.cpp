@@ -23,6 +23,8 @@
 #include "xr/instance.h"
 #include "xr/session.h"
 #include "xr/to_string.h"
+#include <algorithm>
+#include <chrono>
 #include <stdexcept>
 #include <variant>
 #include <openxr/openxr.h>
@@ -50,6 +52,60 @@ xr::fb_body_tracker::fb_body_tracker(instance & inst, session & s, bool full_bod
 		xrRequestBodyTrackingFidelityMETA(id, XR_BODY_TRACKING_FIDELITY_HIGH_META);
 }
 
+xr::fb_body_tracker::~fb_body_tracker()
+{
+	if (active_state_known && !last_active_state)
+		maximum_inactive_duration = std::max(
+		        maximum_inactive_duration,
+		        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - inactive_since));
+
+	if (locate_failures || inactive_samples || inactive_periods)
+	{
+		spdlog::info(
+		        "Meta body tracking summary: locate_failures={}, inactive_samples={}, inactive_periods={}, maximum_inactive={}ms",
+		        locate_failures,
+		        inactive_samples,
+		        inactive_periods,
+		        std::chrono::duration_cast<std::chrono::milliseconds>(maximum_inactive_duration).count());
+	}
+}
+
+void xr::fb_body_tracker::update_active_state(bool active)
+{
+	const auto now = std::chrono::steady_clock::now();
+	if (!active_state_known)
+	{
+		active_state_known = true;
+		last_active_state = active;
+		if (!active)
+		{
+			inactive_periods++;
+			inactive_since = now;
+			spdlog::warn("Meta body tracking started inactive");
+		}
+		return;
+	}
+
+	if (last_active_state == active)
+		return;
+
+	last_active_state = active;
+	if (!active)
+	{
+		inactive_periods++;
+		inactive_since = now;
+		spdlog::warn("Meta body tracking became inactive");
+	}
+	else
+	{
+		const auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(now - inactive_since);
+		maximum_inactive_duration = std::max(maximum_inactive_duration, duration);
+		spdlog::info(
+		        "Meta body tracking recovered after {}ms",
+		        std::chrono::duration_cast<std::chrono::milliseconds>(duration).count());
+	}
+}
+
 xr::fb_body_tracker::packet_type xr::fb_body_tracker::locate_spaces(XrTime time, XrSpace reference)
 {
 	xr::fb_body_tracker::packet_type ret{};
@@ -75,14 +131,23 @@ xr::fb_body_tracker::packet_type xr::fb_body_tracker::locate_spaces(XrTime time,
 
 	if (auto res = xrLocateBodyJointsFB(id, &locate_info, &joint_locations); !XR_SUCCEEDED(res))
 	{
-		spdlog::warn("xrLocateBodyJointsFB returned {}", xr::to_string(res));
+		locate_failures++;
+		const auto now = std::chrono::steady_clock::now();
+		if (now >= next_failure_log)
+		{
+			spdlog::warn("xrLocateBodyJointsFB returned {} ({} failures total)", xr::to_string(res), locate_failures);
+			next_failure_log = now + std::chrono::seconds(5);
+		}
 		return ret;
 	}
 
 	if (!joint_locations.isActive)
 	{
+		inactive_samples++;
+		update_active_state(false);
 		return ret;
 	}
+	update_active_state(true);
 
 	skeleton_generation = joint_locations.skeletonChangedCount;
 	ret.confidence = joint_locations.confidence;
