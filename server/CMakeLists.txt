@@ -295,6 +295,12 @@ if (WIVRN_BUILD_SERVER)
 		target_include_directories(fsr-config-test PRIVATE .)
 		target_link_libraries(fsr-config-test PRIVATE wivrn-common wivrn-external)
 		add_test(NAME fsr-config COMMAND fsr-config-test)
+
+		add_executable(tracking-history-test driver/history_test.cpp)
+		target_compile_features(tracking-history-test PRIVATE cxx_std_20)
+		target_include_directories(tracking-history-test PRIVATE .)
+		target_link_libraries(tracking-history-test PRIVATE aux_util wivrn-common wivrn-external)
+		add_test(NAME tracking-history COMMAND tracking-history-test)
 	endif()
 
 	configure_file(dist/wivrn.service.in wivrn.service)
