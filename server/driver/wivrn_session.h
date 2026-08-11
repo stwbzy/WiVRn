@@ -147,7 +147,6 @@ public:
 	void stop();
 
 	bool request_stop();
-	void quit_if_no_client();
 
 	clock_offset get_offset();
 	bool connected();
@@ -214,6 +213,7 @@ public:
 	void operator()(to_monado::disconnect &&);
 	void operator()(to_monado::set_bitrate &&);
 	void operator()(to_headset::stream_tab_change &&);
+	void operator()(to_headset::application_launch_result &&);
 
 	bool has_stream()
 	{

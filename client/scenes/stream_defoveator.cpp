@@ -45,6 +45,7 @@ struct vert_pc
 	glm::ivec4 a_rect;
 	std::array<float, 4> scale;
 	std::array<float, 4> bias;
+	uint32_t premultiply_alpha;
 };
 
 void stream_defoveator::ensure_vertices(size_t num_vertices)
@@ -308,7 +309,9 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
                                   const std::array<input, 2> & inputs,
                                   std::array<float, 4> scale,
                                   std::array<float, 4> bias,
-                                  int destination)
+                                  int destination,
+                                  std::optional<XrExtent2Di> destination_extent,
+                                  bool premultiply_alpha)
 {
 	if (destination < 0 || destination >= (int)output_images.size())
 		throw std::runtime_error("Invalid destination image index");
@@ -318,6 +321,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 	for (size_t view = 0; view < view_count; ++view)
 	{
 		const auto out_size = defoveated_size(foveation[view]);
+		const auto viewport_size = destination_extent.value_or(out_size);
 		auto vertices = get_vertices(view);
 		const auto & [px, py] = foveation[view];
 		assert(px.size() % 2 == 1);
@@ -328,15 +332,15 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		command_buffer.setScissor(
 		        0,
 		        vk::Rect2D{
-		                .extent = {.width = uint32_t(out_size.width), .height = uint32_t(out_size.height)},
+		                .extent = {.width = uint32_t(viewport_size.width), .height = uint32_t(viewport_size.height)},
 		        });
 		command_buffer.setViewport(
 		        0,
 		        vk::Viewport{
 		                .x = 0,
 		                .y = 0,
-		                .width = float(out_size.width),
-		                .height = float(out_size.height),
+		                .width = float(viewport_size.width),
+		                .height = float(viewport_size.height),
 		                .minDepth = 0,
 		                .maxDepth = 1,
 		        });
@@ -430,6 +434,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		                             input.rect_a.extent.height),
 		        .scale = scale,
 		        .bias = bias,
+		        .premultiply_alpha = premultiply_alpha,
 		};
 
 		device.updateDescriptorSets(descriptor_writes, {});

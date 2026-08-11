@@ -23,6 +23,7 @@
 #include "render/imgui_impl.h"
 #include "wivrn_packets.h"
 #include <chrono>
+#include <optional>
 #include <unordered_map>
 
 namespace scenes
@@ -40,6 +41,9 @@ class app_launcher
 	};
 
 	std::chrono::steady_clock::time_point start_time{};
+	std::chrono::steady_clock::time_point application_list_request_time{};
+	std::optional<std::string> pending_app_id;
+	std::string launch_error;
 	std::string server_name;
 	scenes::stream & stream;
 	imgui_textures textures;
@@ -62,8 +66,11 @@ public:
 	void reset()
 	{
 		start_time = {};
+		pending_app_id.reset();
+		launch_error.clear();
 	}
 
 	void operator()(wivrn::to_headset::application_list && apps);
 	void operator()(wivrn::to_headset::application_icon && icon);
+	void operator()(wivrn::to_headset::application_launch_result && result);
 };

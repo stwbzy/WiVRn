@@ -21,6 +21,7 @@
 
 #include "vk/allocation.h"
 #include "wivrn_packets.h"
+#include <optional>
 #include <vulkan/vulkan_raii.hpp>
 #include <openxr/openxr.h>
 
@@ -89,7 +90,9 @@ public:
 	        const std::array<input, 2> & inputs,
 	        std::array<float, 4> scale,
 	        std::array<float, 4> bias,
-	        int destination);
+	        int destination,
+	        std::optional<XrExtent2Di> destination_extent = std::nullopt,
+	        bool premultiply_alpha = true);
 
 	static XrExtent2Di defoveated_size(const wivrn::to_headset::foveation_parameter &);
 };

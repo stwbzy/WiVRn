@@ -24,6 +24,7 @@ layout(push_constant) uniform pc
 	ivec4 a_rect;
 	vec4 scale;
 	vec4 bias;
+	uint premultiply_alpha;
 };
 
 #ifdef VERT_SHADER
@@ -100,7 +101,8 @@ void main()
 	{
 		outColor.rgb /= outColor.a;
 		outColor = outColor * scale + bias;
-		outColor.rgb *= outColor.a;
+		if (premultiply_alpha != 0)
+			outColor.rgb *= outColor.a;
 	}
 }
 

@@ -15,7 +15,7 @@ The server publishes these states:
 | `handshaking` | Crypto, pairing, transport, headset capabilities, and resume data are being validated. |
 | `streaming` | The complete handshake is valid and the headset session can exchange media and tracking. |
 | `reconnecting` | An unexpected link loss occurred and the active PC session is retained for up to 30 seconds. |
-| `paused` | A voluntary pause retained the PC OpenXR session until the paired headset resumes or WiVRn stops. |
+| `paused` | A voluntary pause or expired automatic retry window retained the PC OpenXR session until the paired headset resumes or WiVRn stops. |
 | `stopping` | Ordered server shutdown is in progress. |
 | `failed` | A terminal connection or resume error was classified and resources are being released. |
 
@@ -97,9 +97,18 @@ objects, recreates PipeWire streams, resets time synchronization, pacing and
 temporal history, rejects stale-generation packets, and requests an IDR. Focus
 and visibility are restored only after fresh stereo video is decoded.
 
-On deadline expiry, the server transitions to
-`failed reason=network_timeout`, closes the retained PC OpenXR session, and
-releases compositor, audio, sockets, and locks.
+On deadline expiry, automatic retries stop and the server transitions to
+`paused reason=network_timeout`. The compositor, encoders, audio, tracking, and
+OpenXR visibility remain paused, but the service keeps listening indefinitely.
+Opening WiVRn later resumes the retained session; an explicit terminate request
+or server shutdown still releases all resources. This also keeps `--no-fork`
+usable after the headset application is closed or the headset is powered off.
+
+After every successful handshake, the headset also stores the numeric address
+and port as a manual fallback. If multicast DNS is blocked or its cache expires,
+the computer remains selectable in the lobby without requiring another URI or
+manual address entry. The fallback can be edited, deleted, or marked for
+autoconnect like any other manual computer.
 
 ## Android OpenXR fallback
 

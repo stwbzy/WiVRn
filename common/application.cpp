@@ -137,17 +137,24 @@ std::optional<application> do_desktop_entry(const std::filesystem::path & filena
 
 	// Most apps are not VR, don't bother parsing the rest
 	bool vr = false;
+	bool xr_plugin = false;
 	for (auto bounds: data | std::views::split('\n'))
 	{
 		std::string_view line(bounds.begin(), bounds.end());
 		key_value item(line);
 		if (item.key == "Categories")
-			vr = contains(item.value, "X-WiVRn-VR");
+			vr = vr or contains(item.value, "X-WiVRn-VR");
+		else if (item.key == "X-XR-Plugin")
+		{
+			xr_plugin = item.value == "true" or item.value == "1";
+			vr = vr or xr_plugin;
+		}
 	}
 	if (not vr)
 		return res;
 
 	res.emplace();
+	std::optional<std::string> xr_plugin_exec;
 	for (auto bounds: data | std::views::split('\n'))
 	{
 		std::string_view line(bounds.begin(), bounds.end());
@@ -170,6 +177,8 @@ std::optional<application> do_desktop_entry(const std::filesystem::path & filena
 			res->name.emplace(item.locale, unescape(item.value));
 		if (item.key == "Exec")
 			res->exec = unescape(item.value);
+		if (item.key == "X-XR-Plugin-Exec")
+			xr_plugin_exec = unescape(item.value);
 		if (item.key == "Path")
 			res->path = unescape(item.value);
 		if (item.key == "Icon")
@@ -182,6 +191,8 @@ std::optional<application> do_desktop_entry(const std::filesystem::path & filena
 			{}
 		}
 	}
+	if (xr_plugin and xr_plugin_exec and not xr_plugin_exec->empty())
+		res->exec = std::move(*xr_plugin_exec);
 
 	if (res->exec.empty() or not res->name.contains(""))
 		res.reset();

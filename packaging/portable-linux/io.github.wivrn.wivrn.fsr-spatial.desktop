@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=WiVRn FSR Spatial Server
+Comment=Start the WiVRn PCVR streamer with spatial reconstruction
+Exec=wivrn-server
+Icon=io.github.wivrn.wivrn
+Terminal=true
+Categories=Utility;

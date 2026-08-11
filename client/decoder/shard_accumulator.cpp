@@ -216,7 +216,10 @@ void shard_accumulator::try_submit_frame(uint16_t shard_idx)
 void shard_accumulator::send_feedback(wivrn::from_headset::feedback & feedback)
 {
 	if (not feedback.received_last_packet)
+	{
+		++dropped_frames_;
 		feedback.received_first_packet = instance.now();
+	}
 	auto scene = weak_scene.lock();
 	if (scene)
 		scene->send_feedback(feedback);

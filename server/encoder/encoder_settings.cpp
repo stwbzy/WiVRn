@@ -21,6 +21,7 @@
 #include "compositor/fsr_config.h"
 #include "driver/configuration.h"
 #include "driver/wivrn_session.h"
+#include "spatial_upscaling.h"
 #include "util/u_logging.h"
 #include "utils/wivrn_vk_bundle.h"
 #include "video_encoder.h"
@@ -379,7 +380,7 @@ std::array<encoder_settings, 3> get_encoder_settings(wivrn::vk_bundle & bundle, 
 	for (auto & i: res)
 		i.bit_depth = bit_depth.value_or(10);
 
-	split_bitrate(res, settings.bitrate_bps);
+	split_bitrate(res, selected_bitrate(settings));
 	return res;
 }
 } // namespace wivrn

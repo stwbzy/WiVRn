@@ -22,6 +22,7 @@
 #include "decoder.h"
 #include "wivrn_packets.h"
 
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -74,6 +75,7 @@ private:
 	shard_set next;
 	std::weak_ptr<scenes::stream> weak_scene;
 	xr::instance & instance;
+	std::atomic_uint64_t dropped_frames_ = 0;
 
 public:
 	explicit shard_accumulator(
@@ -101,6 +103,10 @@ public:
 	}
 
 	using blit_handle = decoder::blit_handle;
+	uint64_t dropped_frames() const
+	{
+		return dropped_frames_.load();
+	}
 
 private:
 	void try_submit_frame(std::optional<uint16_t> shard_idx);

@@ -37,6 +37,8 @@ wivrn::gui::settings_context lobby_settings_context(xr::instance & instance, xr:
 	        .imgui_ctx = imgui_ctx,
 	        .recommended_width = stream_view.recommendedImageRectWidth,
 	        .recommended_height = stream_view.recommendedImageRectHeight,
+	        .maximum_width = stream_view.maxImageRectWidth,
+	        .maximum_height = stream_view.maxImageRectHeight,
 	        .in_game = false,
 	        .server_hid_forwarding = server_hid_forwarding,
 	};

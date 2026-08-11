@@ -23,6 +23,8 @@
 #include "utils/json_string.h"
 #include "wivrn_packets.h"
 
+#include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <functional>
 #include <magic_enum.hpp>
@@ -263,6 +265,18 @@ configuration::configuration(xr::system & system, xr::session & session, const s
 		for (const auto & f: config_fields())
 			f.load(root, *this);
 
+		// The legacy boolean had ambiguous placement/target semantics. Do not
+		// silently enable any of the new modes when migrating an old file.
+		if (!root["spatial_upscaling"].is_string() && root["fsr_upscaling"].is_bool())
+		{
+			spatial_upscaling = wivrn::from_headset::spatial_upscaling_mode::off;
+			spdlog::info("Migrated legacy fsr_upscaling setting to spatial_upscaling=Off");
+		}
+		target_resolution_scale = std::isfinite(target_resolution_scale)
+		                                  ? std::clamp(target_resolution_scale, 0.5f, extended_config ? 1.5f : 1.0f)
+		                                  : 1.0f;
+		bitrate_bps = std::clamp(bitrate_bps, 5'000'000u, max_bitrate());
+
 		// refresh rate must be supported by this headset, otherwise fall back to the default
 		const auto & rates = session.get_refresh_rates();
 		if (preferred_refresh_rate != 0 and not utils::contains(rates, preferred_refresh_rate))
@@ -317,8 +331,10 @@ const std::vector<config_field> & configuration::config_fields()
 {
 	static const std::vector<config_field> fields = {
 	        scalar("resolution_scale", &configuration::resolution_scale),
-	        scalar("fsr_upscaling", &configuration::fsr_upscaling),
+	        scalar("target_resolution_scale", &configuration::target_resolution_scale),
+	        scalar("spatial_upscaling", &configuration::spatial_upscaling),
 	        scalar("bitrate_bps", &configuration::bitrate_bps),
+	        scalar("bitrate_mode", &configuration::bitrate),
 	        scalar("enable_stream_gui", &configuration::enable_stream_gui),
 	        scalar("app_list_view", &configuration::app_list_view),
 	        scalar("app_icon_size", &configuration::app_icon_size),

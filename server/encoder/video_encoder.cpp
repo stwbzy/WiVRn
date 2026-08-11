@@ -27,6 +27,7 @@
 #include "utils/wivrn_trace.h"
 #include "wivrn_config.h"
 
+#include <cinttypes>
 #include <string>
 
 #if WIVRN_USE_NVENC
@@ -210,6 +211,7 @@ video_encoder::~video_encoder()
 {
 	if (shared_sender)
 		shared_sender->wait_idle(this);
+	U_LOG_I("Encoder stream %u transmitted %" PRIu64 " encoded bytes", stream_idx, encoded_bytes.load());
 }
 
 void video_encoder::on_feedback(const from_headset::feedback & feedback)
@@ -308,6 +310,7 @@ void video_encoder::encode(wivrn_session & cnx,
 void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool control)
 {
 	std::lock_guard lock(mutex);
+	encoded_bytes += data.size();
 	if (shard.shard_idx == 0)
 	{
 		// One SendData call per NAL; span the whole frame, not each call.

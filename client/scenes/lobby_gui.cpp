@@ -123,8 +123,9 @@ void scenes::lobby::gui_connecting(locked_notifiable<pin_request_data> & pin_req
 				status = _("Disconnecting cleanly…");
 				break;
 			case stream::state::stalled:
-				status = _("The stream has stalled.");
-				break;
+				current_tab = tab::connected;
+				ImGui::CloseCurrentPopup();
+				return;
 			case stream::state::shutdown:
 				ImGui::CloseCurrentPopup();
 				return;
@@ -465,11 +466,16 @@ void scenes::lobby::gui_server_list()
 			ImGui::SetCursorScreenPos(row.trailing(x, {bh, bh}));
 			if (data.manual)
 			{
+				actions.push_back({ICON_FA_BOLT, auto_l.c_str(), false, data.autoconnect});
 				actions.push_back({ICON_FA_PEN, edit_l.c_str(), false, false});
 				actions.push_back({ICON_FA_TRASH, del_l.c_str(), true, false});
 				switch (ui::action_menu("##menu", ICON_FA_ELLIPSIS_VERTICAL, actions))
 				{
 					case 0:
+						data.autoconnect = not data.autoconnect;
+						config.save();
+						break;
+					case 1:
 						add_server_cookie = cookie;
 						add_server_window_prettyname = data.service.name;
 						add_server_window_hostname = data.service.hostname;
@@ -477,7 +483,7 @@ void scenes::lobby::gui_server_list()
 						add_server_tcp_only = data.service.tcp_only;
 						open_add_edit = true;
 						break;
-					case 1:
+					case 2:
 						delete_server_cookie = cookie;
 						open_delete = true;
 						break;

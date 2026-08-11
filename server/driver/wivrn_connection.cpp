@@ -41,6 +41,7 @@ static void handle_event_from_main_loop(to_monado::stop) {}
 static void handle_event_from_main_loop(to_monado::disconnect) {}
 static void handle_event_from_main_loop(to_monado::set_bitrate) {}
 static void handle_event_from_main_loop(wivrn::to_headset::stream_tab_change) {}
+static void handle_event_from_main_loop(wivrn::to_headset::application_launch_result) {}
 
 static std::string clean_key(std::string key)
 {

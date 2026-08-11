@@ -262,7 +262,8 @@ public:
 				++counters_.successful_reconnections;
 			++generation_;
 		}
-		if (state == server_connection_state::failed && reason == connection_close_reason::network_timeout)
+		if ((state == server_connection_state::failed || state == server_connection_state::paused) &&
+		    state_ == server_connection_state::reconnecting && reason == connection_close_reason::network_timeout)
 			++counters_.reconnection_expirations;
 		state_ = state;
 		reason_ = reason;

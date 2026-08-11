@@ -57,6 +57,17 @@ std::vector<std::filesystem::path> active_runtime::manifest_path()
 	if (std::filesystem::exists(dev_manifest))
 		return {dev_manifest};
 
+	// AppImage and archive builds keep the regular install tree next to the
+	// executable. Prefer that relocatable tree over the compile-time prefix so
+	// extracting the bundle anywhere still activates its matching runtime.
+	auto portable_manifest_dir = exe.parent_path().parent_path() / location;
+	if (std::filesystem::is_directory(portable_manifest_dir))
+	{
+		auto manifests = filter_files(portable_manifest_dir, prefix);
+		if (not manifests.empty())
+			return manifests;
+	}
+
 	// Assume we are installed
 	return filter_files(WIVRN_INSTALL_PREFIX / location, prefix);
 }

@@ -60,6 +60,7 @@ class lobby : public scene_impl<lobby>
 
 	utils::future<std::unique_ptr<wivrn_session>, std::string> async_session;
 	std::optional<std::string> async_error;
+	std::optional<wivrn_discover::service> connecting_service;
 	std::shared_ptr<stream> next_scene;
 	std::string server_name;
 	bool autoconnect_enabled = true;
@@ -104,6 +105,7 @@ class lobby : public scene_impl<lobby>
 #endif
 
 	void update_server_list();
+	void remember_successful_server(const wivrn_discover::service & service, const wivrn_session & session);
 
 	std::vector<std::pair<int, XrCompositionLayerQuad>> draw_gui(XrTime predicted_display_time);
 

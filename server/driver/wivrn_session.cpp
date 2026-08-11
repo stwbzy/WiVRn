@@ -19,6 +19,7 @@
  */
 
 #include "wivrn_session.h"
+#include "spatial_upscaling.h"
 
 #include "accept_connection.h"
 #include "application.h"
@@ -625,9 +626,13 @@ void wivrn_session::operator()(from_headset::stream_ready && ready)
 void wivrn_session::operator()(const from_headset::settings_changed & settings)
 {
 	*this->settings.lock() = settings;
+	U_LOG_I("Streaming settings: bitrate mode=%s base/effective=%u/%u bps",
+	        settings.bitrate == from_headset::bitrate_mode::automatic ? "automatic" : "manual",
+	        settings.bitrate_bps,
+	        settings.effective_bitrate_bps);
 
-	if (settings.bitrate_bps != 0)
-		compositor.set_bitrate(settings.bitrate_bps);
+	if (selected_bitrate(settings) != 0)
+		compositor.set_bitrate(selected_bitrate(settings));
 
 	if (settings.preferred_refresh_rate != 0)
 		compositor.set_framerate(settings.preferred_refresh_rate / settings.fps_divider);
@@ -1174,6 +1179,11 @@ void wivrn_session::operator()(to_headset::stream_tab_change && data)
 	send_control(std::move(data));
 }
 
+void wivrn_session::operator()(to_headset::application_launch_result && data)
+{
+	send_control(std::move(data));
+}
+
 struct refresh_rate_adjuster
 {
 	std::chrono::seconds period{10};
@@ -1330,12 +1340,18 @@ void wivrn_session::run_net(std::stop_token stop)
 
 		if (!reconnect(stop, deadline))
 		{
-			if (!stop.stop_requested())
-			{
-				transition(server_connection_state::failed, connection_close_reason::network_timeout);
-				request_stop();
-			}
-			break;
+			if (stop.stop_requested())
+				break;
+
+			// The automatic retry window expired, but the WiVRn service must
+			// remain available. Keep the already-paused OpenXR session and wait
+			// for a later manual reconnect instead of stopping the whole server.
+			// This is especially important in --no-fork mode, where there is no
+			// parent process available to create a replacement session.
+			transition(server_connection_state::paused, connection_close_reason::network_timeout);
+			U_LOG_I("Automatic reconnect window expired; session remains paused for a later headset reconnect");
+			if (!reconnect(stop, std::nullopt))
+				break;
 		}
 
 		try
@@ -1419,16 +1435,6 @@ void wivrn_session::dump_time(const std::string & event, uint64_t frame, int64_t
 	}
 }
 
-void wivrn_session::quit_if_no_client()
-{
-	scoped_lock lock(xrt_system.sessions.mutex);
-	if (xrt_system.sessions.count == 0)
-	{
-		U_LOG_I("No OpenXR client connected, exiting");
-		request_stop();
-	}
-}
-
 static bool is_audio_changed(const from_headset::headset_info_packet & prev_info, const from_headset::headset_info_packet & info)
 {
 	bool changed = false;
@@ -1461,7 +1467,9 @@ std::pair<bool, std::optional<std::string>> wivrn_session::validate_headset_info
 		refuse |= prev_info.render_eye_height != info.render_eye_height;
 		refuse |= prev_info.native_eye_width != info.native_eye_width;
 		refuse |= prev_info.native_eye_height != info.native_eye_height;
-		refuse |= prev_info.fsr_upscaling != info.fsr_upscaling;
+		refuse |= prev_info.target_eye_width != info.target_eye_width;
+		refuse |= prev_info.target_eye_height != info.target_eye_height;
+		refuse |= prev_info.spatial_upscaling != info.spatial_upscaling;
 		refuse |= prev_info.stream_eye_width != info.stream_eye_width;
 		refuse |= prev_info.stream_eye_height != info.stream_eye_height;
 
@@ -1534,15 +1542,14 @@ bool wivrn_session::reconnect(std::stop_token stop, std::optional<std::chrono::s
 		{
 			// await a new headset connection
 
-			auto tcp = accept_connection(*this, stop, &wivrn_session::quit_if_no_client, deadline);
+			auto tcp = accept_connection(*this, stop, {}, deadline);
 			if (stop.stop_requested())
 				return false;
 			if (not tcp)
 				return false;
 
 			transition(server_connection_state::handshaking);
-			connection->reset(stop, std::move(*tcp), [this, deadline]() {
-				quit_if_no_client();
+			connection->reset(stop, std::move(*tcp), [deadline]() {
 				if (deadline && std::chrono::steady_clock::now() >= *deadline)
 					throw std::runtime_error("Reconnect deadline expired during handshake");
 			});

@@ -167,7 +167,8 @@ wivrnctl disconnect --mode terminate
 
 For a link-loss test, interrupt Wi-Fi for less than 30 seconds. A successful run must show
 `streaming → reconnecting → handshaking → streaming` with a higher generation. A longer outage
-must end in `failed reason=network_timeout` and release the session. `incompatible_resume` means
+must show `reconnecting → paused reason=network_timeout`; reconnecting later must then show
+`paused → handshaking → streaming`. `incompatible_resume` means
 the reconnect did not present both the paired headset key and the active session token, or its
 codec/resolution/FOV/features no longer match.
 

@@ -109,4 +109,18 @@ int main()
 	check(client.transition(client_connection_state::streaming, connection_close_reason::none, 2));
 	check(client.transition(client_connection_state::disconnecting, connection_close_reason::user_requested, 2));
 	check(client.transition(client_connection_state::lobby, connection_close_reason::user_requested, 2));
+
+	// Losing both the headset and the OpenXR application must not make the
+	// service terminal. After the automatic retry window, the retained session
+	// moves to an indefinite pause and can still accept a later reconnect.
+	connection_lifecycle persistent;
+	check(persistent.transition(server_connection_state::handshaking));
+	check(persistent.transition(server_connection_state::streaming));
+	check(persistent.transition(server_connection_state::reconnecting, connection_close_reason::peer_closed));
+	check(persistent.transition(server_connection_state::paused, connection_close_reason::network_timeout));
+	check(persistent.snapshot().counters.reconnection_expirations == 1);
+	check(persistent.transition(server_connection_state::handshaking));
+	check(persistent.transition(server_connection_state::streaming));
+	check(persistent.snapshot().generation == 2);
+	check(persistent.snapshot().counters.successful_reconnections == 1);
 }

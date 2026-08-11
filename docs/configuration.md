@@ -128,8 +128,9 @@ Controls what happens to the PC OpenXR session after a voluntary disconnect.
 The headset's Disconnect button and `wivrnctl disconnect --mode default` use this value.
 `wivrnctl disconnect --mode pause|terminate` overrides it for one request.
 
-Unexpected transport loss always uses the separate 30-second automatic-resume window; it is not
-controlled by this setting.
+Unexpected transport loss always uses a separate 30-second automatic-resume window; it is not
+controlled by this setting. When that window expires, automatic retries stop but the server keeps
+the session paused and continues listening for a later manual reconnect.
 
 Example:
 
@@ -199,15 +200,13 @@ Default value: unset
 
 If set, overrides the name displayed in the server list.
 
-## FSR 1 spatial upscaling
+## Spatial upscaling
 
-The headset setting `fsr_upscaling` defaults to `false` and is persisted in
-`client.json`. In **Settings → Video**, first set **Render resolution** below
-100%, then enable **FSR 1 spatial upscaling**. Both settings are locked during
-a session and take effect after reconnection.
+`spatial_upscaling` defaults to `off`; valid values are `off`, `fsr1_pc`,
+`sgsr1_headset`, `fsr1_headset`, and `nis_headset`. `resolution_scale` remains
+the game resolution and `target_resolution_scale` controls the final headset
+swapchain. The old `fsr_upscaling` boolean is ignored and migrated to Off.
 
-FSR reconstructs the reduced render to the runtime's native per-eye size, then
-the existing foveated encoder produces the stream size. RCAS defaults to 0.2
-stops and is clamped to the supported 0–2 range. Application SpaceWarp is a
-separate headset feature; leave it off while testing FSR. See
-[fsr-spatial.md](fsr-spatial.md) for the A/B procedure.
+`bitrate_mode` is `automatic` (the default) or `manual`, while `bitrate_bps`
+remains the user's hard budget. See [fsr-spatial.md](fsr-spatial.md) for pipeline details,
+limits, fallback behavior, and the physical test matrix.

@@ -33,8 +33,8 @@
 #include <vector>
 #include <openxr/openxr.h>
 
-#include "packed_quaternion.h"
 #include "connection_lifecycle.h"
+#include "packed_quaternion.h"
 #include "smp.h"
 #include "wivrn_serialization_types.h"
 
@@ -275,6 +275,23 @@ enum class body_type : uint8_t
 	htc,
 };
 
+// Where spatial reconstruction runs and which algorithm is used. Keep off as
+// zero so value-initialized packets and migrated configurations remain opt-in.
+enum class spatial_upscaling_mode : uint8_t
+{
+	off,
+	fsr1_pc,
+	sgsr1_headset,
+	fsr1_headset,
+	nis_headset,
+};
+
+enum class bitrate_mode : uint8_t
+{
+	automatic,
+	manual,
+};
+
 enum class body_part_mask : uint32_t
 {
 	chest = 1 << 0,
@@ -295,7 +312,11 @@ struct settings_changed
 	float minimum_refresh_rate;
 
 	uint32_t fps_divider = 1;
-	uint32_t bitrate_bps;
+	// bitrate_bps is the user's budget. effective_bitrate_bps is the value
+	// selected by the headset after accounting for the real encoded area.
+	uint32_t bitrate_bps = 50'000'000;
+	uint32_t effective_bitrate_bps = 50'000'000;
+	bitrate_mode bitrate = bitrate_mode::automatic;
 
 	// Whether the server should mirror the gamepad to a virtual uinput device;
 	// gamepad inputs are always forwarded for the OpenXR path
@@ -316,9 +337,11 @@ struct headset_info_packet
 	uint16_t render_eye_height;
 	uint16_t stream_eye_width;
 	uint16_t stream_eye_height;
-	// Reconstruct the composed render image to the native per-eye size with
-	// FSR 1 before applying the existing foveated encoder transform.
-	bool fsr_upscaling = false;
+	// Final per-eye swapchain size requested by the headset. This is kept
+	// separate from both the game render size and the foveated stream size.
+	uint16_t target_eye_width;
+	uint16_t target_eye_height;
+	spatial_upscaling_mode spatial_upscaling = spatial_upscaling_mode::off;
 	std::vector<float> available_refresh_rates;
 
 	// runtime configurable settings
@@ -746,10 +769,10 @@ using packets = std::variant<
         feedback,
         audio_data,
         handshake,
-		disconnect_request,
-		disconnect_ack,
-		heartbeat,
-		stream_ready,
+        disconnect_request,
+        disconnect_ack,
+        heartbeat,
+        stream_ready,
         tracking,
         derived_pose,
         hand_tracking,
@@ -1006,6 +1029,13 @@ struct application_icon
 	std::vector<std::byte> image; // In PNG
 };
 
+struct application_launch_result
+{
+	std::string id;
+	bool accepted;
+	std::string message;
+};
+
 struct running_applications
 {
 	struct application
@@ -1023,10 +1053,10 @@ using packets = std::variant<
         pin_check_2,
         pin_check_4,
         handshake,
-		disconnect_request,
-		disconnect_ack,
-		connection_state,
-		heartbeat,
+        disconnect_request,
+        disconnect_ack,
+        connection_state,
+        heartbeat,
         server_message,
         audio_stream_description,
         video_stream_description,
@@ -1040,6 +1070,7 @@ using packets = std::variant<
         stream_tab_change,
         application_list,
         application_icon,
+        application_launch_result,
         running_applications>;
 } // namespace to_headset
 } // namespace wivrn

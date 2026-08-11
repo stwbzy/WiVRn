@@ -120,6 +120,7 @@ file(GLOB LOCAL_SOURCE CONFIGURE_DEPENDS
 
 file(GLOB_RECURSE VULKAN_SHADERS CONFIGURE_DEPENDS "*.glsl")
 target_sources(wivrn PRIVATE ${LOCAL_SOURCE} ${VULKAN_SHADERS})
+target_sources(wivrn PRIVATE ${CMAKE_SOURCE_DIR}/common/spatial_upscaling.cpp)
 wivrn_compile_glsl(wivrn SHADERS ${VULKAN_SHADERS})
 
 target_link_libraries(wivrn
@@ -246,6 +247,7 @@ set(LICENSES_DIR "${ASSETS_DIR}/licenses")
 
 file(MAKE_DIRECTORY "${LICENSES_DIR}")
 file(COPY_FILE "${CMAKE_SOURCE_DIR}/COPYING" "${LICENSES_DIR}/WiVRn")
+file(COPY_FILE "${CMAKE_SOURCE_DIR}/LICENSE-SPATIAL-UPSCALING" "${LICENSES_DIR}/spatial-upscaling")
 file(COPY_FILE "${simdjson_SOURCE_DIR}/LICENSE" "${LICENSES_DIR}/simdjson")
 file(COPY_FILE "${CMAKE_SOURCE_DIR}/LICENSE-OFL-1.1" "${LICENSES_DIR}/FontAwesome")
 if (OPENXR_SOURCE_DIR)

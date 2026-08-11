@@ -31,6 +31,7 @@
 #include "implot.h"
 #include "render/ui_theme.h"
 #include "render/ui_widgets.h"
+#include "stream_configuration.h"
 #include "utils/i18n.h"
 #include "utils/ranges.h"
 #include <IconsFontAwesome6.h>
@@ -111,7 +112,7 @@ void scenes::stream::accumulate_metrics(XrTime predicted_display_time, const std
 	compact_bandwidth_rx = 0.99 * compact_bandwidth_rx + 0.01 * float(rx - bytes_received) / dt;
 	compact_bandwidth_tx = 0.99 * compact_bandwidth_tx + 0.01 * float(tx - bytes_sent) / dt;
 	compact_cpu_time = 0.99 * compact_cpu_time + 0.01 * application::get_cpu_time().count() * 1e-9f;
-	compact_gpu_time = 0.99 * compact_gpu_time + 0.01 * timestamps.gpu_time;
+	compact_gpu_time = 0.99 * compact_gpu_time + 0.01 * (timestamps.defoveate_time + timestamps.upscale_time);
 
 	last_metric_time = predicted_display_time;
 	bytes_received = rx;
@@ -178,7 +179,8 @@ void scenes::stream::gui_performance_metrics()
 	        // clang-format off
 	        plot(_("CPU time"), {{"",          &global_metric::cpu_time}},     "s"),
 
-	        plot(_("GPU time"), {{_("Defoveate"), &global_metric::gpu_time}},  "s"),
+	        plot(_("GPU time"), {{_("Defoveate"), &global_metric::defoveate_time},
+	                             {_("Spatial upscale"), &global_metric::upscale_time}}, "s"),
 
 	        plot(_("Network"), {{_("Download"),  &global_metric::bandwidth_rx},
 	                            {_("Upload"),    &global_metric::bandwidth_tx}}, "bit/s"),
@@ -386,17 +388,12 @@ void scenes::stream::gui_compact_view()
 	}
 }
 
-static void send_settings_changed_packet(xr::session & session, wivrn_session * network, const configuration & config)
+static void send_settings_changed_packet(xr::session & session,
+                                         wivrn_session * network,
+                                         const configuration & config,
+                                         const from_headset::headset_info_packet & info)
 {
-	network->send_control(
-	        from_headset::settings_changed{
-	                .preferred_refresh_rate = config.preferred_refresh_rate,
-	                .minimum_refresh_rate = config.minimum_refresh_rate.value_or(0),
-	                .fps_divider = config.fps_divider,
-	                .bitrate_bps = config.bitrate_bps,
-	                .mirror_gamepad = config.forward_gamepad,
-	                .enabled_body_parts = config.body_part_mask,
-	        });
+	network->send_control(make_stream_settings(config, info));
 }
 
 void scenes::stream::gui_settings(float)
@@ -411,9 +408,11 @@ void scenes::stream::gui_settings(float)
 	        .imgui_ctx = *imgui_ctx,
 	        .recommended_width = width,
 	        .recommended_height = height,
+	        .maximum_width = system.view_configuration_views(viewconfig)[0].maxImageRectWidth,
+	        .maximum_height = system.view_configuration_views(viewconfig)[0].maxImageRectHeight,
 	        .in_game = true,
 	        .server_hid_forwarding = hid_forwarding_enabled(),
-	        .on_streaming_changed = [this] { send_settings_changed_packet(session, network_session.get(), application::get_config()); },
+	        .on_streaming_changed = [this] { send_settings_changed_packet(session, network_session.get(), application::get_config(), reconnect_info); },
 	        .enter_foveation_adjust = [this] { next_gui_status = stream_tab::foveation_settings; },
 	        .on_foveation_override_changed = [this] {
 		        const auto & config = application::get_config();
@@ -446,7 +445,7 @@ void scenes::stream::gui_settings(float)
 			break;
 		case settings_page::tracking:
 			if (wivrn::gui::settings_tracking(ctx))
-				send_settings_changed_packet(session, network_session.get(), ctx.config);
+				send_settings_changed_packet(session, network_session.get(), ctx.config, reconnect_info);
 			break;
 		case settings_page::system:
 			wivrn::gui::settings_system(ctx);
@@ -469,7 +468,7 @@ void scenes::stream::gui_bitrate_settings(float predicted_display_period)
 	// Maximum speed of 20Mbit/s
 	float delta = application::read_action_float(settings_adjust).value_or(std::pair{0, 0}).second * 20'000'000.f * predicted_display_period;
 
-	config.bitrate_bps = std::clamp(config.bitrate_bps + static_cast<int32_t>(delta), 1'000'000u, config.max_bitrate());
+	config.bitrate_bps = std::clamp(config.bitrate_bps + static_cast<int32_t>(delta), 5'000'000u, config.max_bitrate());
 
 	bool ok = application::read_action_bool(foveation_ok).value_or(std::pair{0, false}).second;
 
@@ -479,7 +478,7 @@ void scenes::stream::gui_bitrate_settings(float predicted_display_period)
 		next_gui_status = stream_tab::settings;
 	}
 
-	send_settings_changed_packet(session, network_session.get(), application::get_config());
+	send_settings_changed_packet(session, network_session.get(), application::get_config(), reconnect_info);
 }
 
 void scenes::stream::gui_foveation_settings(float predicted_display_period)
@@ -1008,11 +1007,7 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 			if (wivrn::ui::nav_item(ICON_FA_ROCKET, _cS("tab label", "Start"), false))
 			{
 				apps.reset();
-				network_session->send_control(from_headset::get_application_list{
-				        .language = application::get_messages_info().language,
-				        .country = application::get_messages_info().country,
-				        .variant = application::get_messages_info().variant,
-				});
+				request_application_list();
 				next_gui_status = stream_tab::application_launcher;
 			}
 			if (wivrn::ui::nav_item(ICON_FA_COMPUTER, _S("Statistics"), gui_status == stream_tab::stats))

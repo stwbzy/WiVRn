@@ -32,10 +32,11 @@
 
 #include "application.h"
 #include "audio/audio.h"
-#include "boost/pfr/core.hpp"
 #include "decoder/shard_accumulator.h"
 #include "inplace_vector.hpp"
+#include "spatial_upscaling.h"
 #include "spdlog/spdlog.h"
+#include "stream_configuration.h"
 #include "utils/named_thread.h"
 #include "utils/ranges.h"
 #include "wivrn_packets.h"
@@ -240,19 +241,11 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 		{
 			auto view = self->system.view_configuration_views(self->viewconfig)[0];
 			view = application::get_hmd_traits().override_view(view);
-
-			info.native_eye_width = view.recommendedImageRectWidth;
-			info.native_eye_height = view.recommendedImageRectHeight;
-			info.render_eye_width = view.recommendedImageRectWidth * config.resolution_scale;
-			info.render_eye_height = view.recommendedImageRectHeight * config.resolution_scale;
+			configure_stream_dimensions(info, config, view);
+			if (config.spatial_upscaling != info.spatial_upscaling)
+				spdlog::warn("Requested spatial upscaling mode is unavailable for this GPU or resolution pair; using Off");
 		}
-
-		{
-			auto scale = config.get_stream_scale();
-			info.stream_eye_width = info.render_eye_width * scale;
-			info.stream_eye_height = info.render_eye_height * scale;
-		}
-		info.fsr_upscaling = config.use_fsr_upscaling();
+		info.settings = make_stream_settings(config, info);
 
 		if (self->instance.has_extension(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME))
 		{
@@ -269,9 +262,20 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 			info.settings.preferred_refresh_rate = guessed_fps;
 		}
 
-		info.settings.bitrate_bps = config.bitrate_bps;
-		info.settings.mirror_gamepad = config.forward_gamepad;
-		info.settings.enabled_body_parts = config.body_part_mask;
+		const auto encoded = align_video_extent(transport_extent(info));
+		spdlog::info("Stream configuration: algorithm={}, game={}x{}, stream={}x{} (encoded {}x{}), target={}x{}, bitrate base/effective={}/{} Mbit/s ({})",
+		             spatial_upscaling_name(info.spatial_upscaling),
+		             info.render_eye_width,
+		             info.render_eye_height,
+		             info.stream_eye_width,
+		             info.stream_eye_height,
+		             encoded[0],
+		             encoded[1],
+		             info.target_eye_width,
+		             info.target_eye_height,
+		             info.settings.bitrate_bps / 1'000'000,
+		             info.settings.effective_bitrate_bps / 1'000'000,
+		             info.settings.bitrate == from_headset::bitrate_mode::automatic ? "automatic" : "manual");
 
 		info.hand_tracking = config.check_feature(feature::hand_tracking);
 		info.eye_gaze = config.check_feature(feature::eye_gaze);
@@ -607,6 +611,36 @@ scenes::stream::~stream()
 
 	if (network_thread.joinable())
 		network_thread.join();
+
+	device.waitIdle();
+	defoveator.reset();
+	spatial_upscaler.reset();
+
+	auto p95 = [](std::vector<float> values) {
+		std::erase_if(values, [](float value) { return value <= 0; });
+		if (values.empty())
+			return 0.0f;
+		std::ranges::sort(values);
+		return values[std::min(values.size() - 1, size_t(std::ceil(values.size() * 0.95) - 1))];
+	};
+	std::vector<float> defoveate_samples;
+	std::vector<float> upscale_samples;
+	for (const auto & metric: global_metrics)
+	{
+		defoveate_samples.push_back(metric.defoveate_time);
+		upscale_samples.push_back(metric.upscale_time);
+	}
+	uint64_t lost_frames = 0;
+	for (const auto & decoder: decoders)
+		if (decoder.decoder)
+			lost_frames += decoder.decoder->dropped_frames();
+	spdlog::info("Stream connection summary: algorithm={}, received={} bytes, sent={} bytes, lost_frames={}, GPU defoveate/upscale p95={:.3f}/{:.3f} ms",
+	             spatial_upscaling_name(reconnect_info.spatial_upscaling),
+	             network_session ? network_session->bytes_received() : 0,
+	             network_session ? network_session->bytes_sent() : 0,
+	             lost_frames,
+	             p95(std::move(defoveate_samples)) * 1000,
+	             p95(std::move(upscale_samples)) * 1000);
 }
 
 void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_ptr<shard_accumulator::blit_handle> handle)
@@ -882,11 +916,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 
 	if (state_ == state::stalled)
 	{
-		network_session->send_control(from_headset::get_application_list{
-		        .language = application::get_messages_info().language,
-		        .country = application::get_messages_info().country,
-		        .variant = application::get_messages_info().variant,
-		});
+		request_application_list();
 
 		next_gui_status = stream_tab::hidden;
 		application::pop_scene();
@@ -910,9 +940,9 @@ void scenes::stream::render(const XrFrameState & frame_state)
 
 		if (res == vk::Result::eSuccess)
 		{
-			boost::pfr::for_each_field(timestamps, [n = 1, &timestamps2](float & t) mutable {
-				t = (timestamps2[n++] - timestamps2[0]) * application::get_physical_device_properties().limits.timestampPeriod / 1e9;
-			});
+			const double period = application::get_physical_device_properties().limits.timestampPeriod / 1e9;
+			timestamps.defoveate_time = (timestamps2[1] - timestamps2[0]) * period;
+			timestamps.upscale_time = (timestamps2[2] - timestamps2[1]) * period;
 		}
 	}
 
@@ -1023,16 +1053,37 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	{
 		XrExtent2Di extents[view_count];
 		{
-			int32_t max_width = 0;
-			int32_t max_height = 0;
+			int32_t input_max_width = 0;
+			int32_t input_max_height = 0;
 			for (size_t i = 0; i < view_count; ++i)
 			{
 				extents[i] = stream_defoveator::defoveated_size(foveation[i]);
-				max_width = std::max(max_width, extents[i].width);
-				max_height = std::max(max_height, extents[i].height);
+				input_max_width = std::max(input_max_width, extents[i].width);
+				input_max_height = std::max(input_max_height, extents[i].height);
 			}
+			const spatial_extent target{reconnect_info.target_eye_width, reconnect_info.target_eye_height};
+			const bool reconstruct_on_headset = is_headset_upscaling(reconnect_info.spatial_upscaling) &&
+			                                    valid_upscaling_extent(reconnect_info.spatial_upscaling,
+			                                                           {uint32_t(input_max_width), uint32_t(input_max_height)},
+			                                                           target);
+			const bool direct_downscale = target[0] > 0 && target[1] > 0 &&
+			                              target[0] <= uint32_t(input_max_width) &&
+			                              target[1] <= uint32_t(input_max_height) &&
+			                              target != spatial_extent{uint32_t(input_max_width), uint32_t(input_max_height)};
+			int32_t max_width = reconstruct_on_headset || direct_downscale ? target[0] : input_max_width;
+			int32_t max_height = reconstruct_on_headset || direct_downscale ? target[1] : input_max_height;
+			if (reconstruct_on_headset || direct_downscale)
+				for (auto & extent: extents)
+					extent = {max_width, max_height};
 			if (not swapchain)
-				setup_reprojection_swapchain(max_width, max_height);
+				setup_reprojection_swapchain(max_width, max_height, input_max_width, input_max_height);
+			else if (headset_upscale_path != reconstruct_on_headset ||
+			         (spatial_upscaler && spatial_upscaler->input_size() !=
+			                                      vk::Extent2D{uint32_t(input_max_width), uint32_t(input_max_height)}))
+			{
+				spdlog::info("Recreating spatial path for input {}x{}", input_max_width, input_max_height);
+				setup_reprojection_swapchain(max_width, max_height, input_max_width, input_max_height);
+			}
 			else if (swapchain.width() < max_width or swapchain.height() < max_height)
 			{
 				// If the defoveated image is larger than the swapchain, try to reallocate one
@@ -1043,7 +1094,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 					             swapchain.height(),
 					             max_width,
 					             max_height);
-					setup_reprojection_swapchain(max_width, max_height);
+					setup_reprojection_swapchain(max_width, max_height, input_max_width, input_max_height);
 				}
 				catch (std::exception & e)
 				{
@@ -1083,14 +1134,20 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		const float scale = std::lerp(1, constants::stream::dimming_scale, x);
 		const float bias = std::lerp(0, constants::stream::dimming_bias, x);
 
+		assert(!spatial_upscaler || !direct_scaled_output);
 		defoveator->defoveate(command_buffer,
 		                      foveation,
 		                      images,
 		                      {scale, scale, scale, 1.},
 		                      {bias, bias, bias, 0.},
-		                      image_index);
+		                      spatial_upscaler ? 0 : image_index,
+		                      direct_scaled_output ? std::optional<XrExtent2Di>{swapchain.extent()} : std::nullopt,
+		                      !spatial_upscaler);
 
 		command_buffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *query_pool, 1);
+		if (spatial_upscaler)
+			spatial_upscaler->upscale(command_buffer, image_index, use_alpha);
+		command_buffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *query_pool, 2);
 
 		command_buffer.end();
 		vk::SubmitInfo submit_info;
@@ -1325,11 +1382,18 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 		defoveator->reset_pipelines();
 }
 
-void scenes::stream::setup_reprojection_swapchain(uint32_t swapchain_width, uint32_t swapchain_height)
+void scenes::stream::setup_reprojection_swapchain(uint32_t swapchain_width,
+                                                  uint32_t swapchain_height,
+                                                  uint32_t input_width,
+                                                  uint32_t input_height)
 {
 	assert(swapchain_width);
 	assert(swapchain_height);
 	device.waitIdle();
+	// Views and framebuffers must be destroyed before replacing the OpenXR
+	// swapchain images they reference.
+	defoveator.reset();
+	spatial_upscaler.reset();
 	spdlog::info("swapchain setup, refresh rate {}", video_stream_description->refresh_rate);
 	session.set_refresh_rate(video_stream_description->refresh_rate);
 
@@ -1346,12 +1410,60 @@ void scenes::stream::setup_reprojection_swapchain(uint32_t swapchain_width, uint
 	spdlog::info("Initializing reprojector");
 	vk::Extent2D extent = {(uint32_t)swapchain.width(), (uint32_t)swapchain.height()};
 
-	defoveator.emplace(
-	        device,
-	        physical_device,
-	        swapchain.images(),
-	        extent,
-	        swapchain.format());
+	const bool wants_headset_upscaling = is_headset_upscaling(reconnect_info.spatial_upscaling) &&
+	                                     valid_upscaling_extent(reconnect_info.spatial_upscaling,
+	                                                            {input_width, input_height},
+	                                                            {swapchain_width, swapchain_height});
+	headset_upscale_path = wants_headset_upscaling;
+	direct_scaled_output = !wants_headset_upscaling &&
+	                       (input_width != swapchain_width || input_height != swapchain_height);
+	if (wants_headset_upscaling)
+	{
+		try
+		{
+			spatial_upscaler.emplace(device,
+			                         swapchain.images(),
+			                         vk::Extent2D{input_width, input_height},
+			                         extent,
+			                         swapchain.format(),
+			                         reconnect_info.spatial_upscaling);
+			defoveator.emplace(device,
+			                   physical_device,
+			                   spatial_upscaler->input_images(),
+			                   vk::Extent2D{input_width, input_height},
+			                   swapchain.format());
+			spdlog::info("Headset spatial reconstruction: {} {}x{} -> {}x{}{}",
+			             spatial_upscaling_name(reconnect_info.spatial_upscaling),
+			             input_width,
+			             input_height,
+			             swapchain_width,
+			             swapchain_height,
+			             spatial_upscaler->using_fallback() ? " (bilinear fallback)" : "");
+			if (spatial_upscaler->using_fallback())
+			{
+				auto toast = gui_toast.lock();
+				toast->emplace("Spatial upscaling failed; using bilinear fallback", true);
+				gui_status_last_change = instance.now();
+			}
+		}
+		catch (const std::exception & error)
+		{
+			spatial_upscaler.reset();
+			direct_scaled_output = true;
+			spdlog::error("Cannot initialize {} headset reconstruction: {}; using fused bilinear fallback",
+			              spatial_upscaling_name(reconnect_info.spatial_upscaling),
+			              error.what());
+			auto toast = gui_toast.lock();
+			toast->emplace("Spatial upscaling resources failed; using bilinear fallback", true);
+			gui_status_last_change = instance.now();
+		}
+	}
+	if (!defoveator)
+		defoveator.emplace(device,
+		                   physical_device,
+		                   swapchain.images(),
+		                   extent,
+		                   swapchain.format());
 }
 
 scene::meta & scenes::stream::get_meta_scene()

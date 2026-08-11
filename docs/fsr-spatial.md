@@ -1,69 +1,86 @@
-# FSR 1 spatial upscaling
+# Spatial reconstruction on PC or headset
 
-WiVRn can reconstruct a reduced per-eye render with AMD FidelityFX FSR 1
-EASU, apply RCAS sharpening, and then feed the result to the existing foveated
-encoder. This is spatial processing of the current frame only. It is not FSR
-3, frame generation, or Application SpaceWarp.
+WiVRn can reconstruct a reduced per-eye game image to an independent target
+resolution. The feature processes only the current decoded frame and never
+injects code into the streamed application.
 
-## Enable it
+The available modes are **Off**, **PC — FSR1**, **Headset — SGSR1**,
+**Headset — FSR1**, and **Headset — NIS**. Off is the default. Quest/Adreno
+shows all modes and recommends SGSR1; other GPUs initially expose only Off and
+PC FSR1. Legacy `fsr_upscaling` configuration is deliberately migrated to Off.
 
-1. Install an APK built from the same commit as the server.
-2. Open **Settings → Video** on the headset.
-3. Set **Render resolution** to 80% as the initial test point.
-4. Enable **FSR 1 spatial upscaling**.
-5. Leave **Application SpaceWarp** off and reconnect.
+## Configuration contract
 
-The FSR switch defaults to off, is unavailable at 100% or higher, and is
-locked while streaming because it changes negotiated image and encoder sizes.
+- **Game resolution** is advertised to the PC OpenXR application.
+- **Target resolution** is the final headset swapchain size. It is limited to
+  100% normally and 150% with extended configuration, and is always clamped
+  to the OpenXR runtime limit.
+- **Foveated encoding** controls the non-uniform transport reduction.
+- **Bitrate mode** defaults to automatic, with manual available. Automatic scales the user's budget
+  by the aligned, actually encoded area relative to native resolution with
+  default foveation, clamped between 5 Mbit/s and the budget.
 
-The server should report a line similar to:
+Equal game and target sizes bypass reconstruction. A smaller target uses the
+existing fused bilinear downscale; an upscaler is never used for downscaling.
+An upscale greater than 2x on either axis is rejected safely. With **Off**, a
+target above game resolution is ignored and the game-sized swapchain is kept.
+Settings that change negotiated sizes are locked during a session.
+
+## Pipelines
+
+PC FSR1 performs:
 
 ```text
-FSR 1 spatial upscaling enabled: 1600x1760 -> 2000x2200 per eye, RCAS 0.20
+OpenXR layers → EASU → RCAS → foveated encoding → network → decode → swapchain
 ```
 
-If Vulkan resource or pipeline initialization fails, the server logs a warning
-and uses normal composition. It never substitutes an uninitialized image.
-
-## Pipeline and color contract
-
-For every OpenXR frame, the compositor performs exactly one sequence:
+Headset modes perform:
 
 ```text
-layers at render size → EASU to native size → RCAS → foveated encoder → one encoded frame
+OpenXR layers → foveated encoding → network → decode → defoveate to game size
+              → SGSR1 / FSR1 / NIS → target swapchain → WiVRn UI layer
 ```
 
-The squasher input is sampled as sRGB data, EASU and RCAS use RGBA16F
-intermediates, and RCAS returns linear RGB for the encoder conversion. Explicit
-Vulkan barriers separate squashing, EASU, RCAS, foveation, and encoder access.
-The encoded dimensions are calculated from the reconstructed native size and
-the existing foveation ratio, then aligned for the selected encoder.
+The headset path uses a per-eye array image between defoveation and spatial
+reconstruction. SGSR1 is a fragment pass; FSR1 uses EASU then RCAS; NIS uses
+the official 32x24 NVScaler compute layout and filter banks, followed by a
+color-safe copy from a private block-aligned RGBA16F image. Alpha is kept
+unassociated while filtering and premultiplied again for composition, avoiding
+color bleed at passthrough edges. If an image, shader, or algorithm pipeline
+cannot be created, the complete target is filled through the bilinear fallback
+and a visible toast plus log entry is emitted. Set
+`WIVRN_SPATIAL_FORCE_FALLBACK=1` in a development build to exercise it.
 
-FSR has no history, saved poses, optical flow, or cross-connection state. The
-server has no candidate-frame, handoff, double-rate, or frame-generation path.
+SGSR1 is adapted from Qualcomm's BSD-3-Clause Vulkan GLSL shader, FSR1 from
+AMD's MIT-licensed FidelityFX FSR1 EASU/RCAS formulation, and NIS is adapted
+from the MIT-licensed NVIDIA Image Scaling SDK 1.0.3 NVScaler source and
+coefficient tables. Source headers and binary notices retain their licenses.
 
-## A/B diagnosis
+CMAA2 is not offered as a reconstruction mode: it is a conservative
+morphological anti-aliasing post-process, not an image upscaler. Its compute
+implementation can be ported to Vulkan/Linux, but it would complement one of
+the modes above rather than reduce the transported resolution by itself.
 
-Keep refresh rate, bitrate, codec, game scene, and Application SpaceWarp
-unchanged. Reconnect for each case:
+## Verification matrix
 
-1. 100%, FSR off: native control.
-2. 80%, FSR off: reduced-resolution control.
-3. 80%, FSR on: spatial reconstruction.
+Build APK and server from the same commit; the protocol hash intentionally
+changes with this negotiation. With Application SpaceWarp disabled at 90 Hz,
+test 100/100 Off, 80/80 Off, 80/100 PC FSR1, each 80/100 headset algorithm,
+and 65/100 SGSR1. Compare all modes first at the same manual bitrate, then in
+automatic mode.
 
-If case 2 is stable and case 3 is not, capture server logs with Vulkan
-validation enabled. If both reduced-resolution cases fail, investigate the
-render/stream configuration rather than FSR.
+Use high-contrast text, diagonals, particles, avatars, rapid head movement,
+and both-eye boundary patterns. Record encode/network/decode time, the separate
+defoveation and upscale GPU plots, temperature, battery, bytes, and lost frames.
+Run each mode for 30 minutes and finish with a two-hour SGSR1 soak.
 
-## Physical acceptance matrix
+Acceptance requires no black frames, flashes, cross-eye contamination, or
+Vulkan errors; stable 1:1 cadence; headset upscale below 2 ms p95; and at least
+1 ms before the 11.111 ms deadline. Automatic mode must reduce measured traffic
+when encoded area drops. NIS is not accepted merely because its pipeline
+initializes: its larger compute workload must meet the same thermal and p95
+limits on the target Quest model.
 
-- Run 80% with FSR on for at least two hours at 90 Hz.
-- Complete twenty disconnect/reconnect cycles.
-- Confirm no black frames during start, pause, or reconnect.
-- Confirm cadence remains 1:1 and no frame-generation activity exists.
-- Check Vulkan validation, encoder timeouts, and memory growth.
-- Verify FBT, controllers, audio, disconnect, and reconnect.
-- Confirm the Intel Arc A750 does not need its 190 W power limit.
-
-Keep prior artifacts until this matrix passes. Publish only a matching APK and
-streamer built from one commit, initially as an FSR spatial stable pre-release.
+FSR2/3/4 temporal reconstruction is intentionally absent: arbitrary OpenXR
+applications do not universally provide the runtime with motion vectors,
+depth, jitter, and object data required by those algorithms.

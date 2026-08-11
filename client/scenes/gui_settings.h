@@ -48,6 +48,8 @@ struct settings_context
 	// recommended per-eye render resolution, for the resolution description
 	uint32_t recommended_width = 0;
 	uint32_t recommended_height = 0;
+	uint32_t maximum_width = 0;
+	uint32_t maximum_height = 0;
 
 	// streaming: connection-time settings are disabled, in-stream controls appear
 	bool in_game = false;

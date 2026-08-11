@@ -121,6 +121,13 @@ app_launcher::clicked app_launcher::draw_gui(imgui_context & imgui_ctx, const st
 	                    t0 - start_time < 10s;
 
 	auto apps = applications.lock();
+	if (apps->empty() and
+	    (application_list_request_time == std::chrono::steady_clock::time_point{} or
+	     t0 - application_list_request_time >= 2s))
+	{
+		application_list_request_time = t0;
+		stream.request_application_list();
+	}
 
 	// resolve an app's icon, uploading lazily and capped per frame to stay responsive
 	auto texture_for = [&](app & a) -> ImTextureID {
@@ -148,6 +155,8 @@ app_launcher::clicked app_launcher::draw_gui(imgui_context & imgui_ctx, const st
 	auto launch = [&](const std::string & id) {
 		res = clicked::Start;
 		start_time = t0;
+		pending_app_id = id;
+		launch_error.clear();
 		stream.start_application(id);
 	};
 
@@ -205,6 +214,13 @@ app_launcher::clicked app_launcher::draw_gui(imgui_context & imgui_ctx, const st
 	}
 
 	ImGui::SetCursorPos({ImGui::GetCursorStartPos().x, content_y});
+	if (not launch_error.empty())
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, ui::current().col(ui::current().danger));
+		ImGui::TextWrapped("%s", launch_error.c_str());
+		ImGui::PopStyleColor();
+		ImGui::Spacing();
+	}
 
 	if (not has_apps)
 	{
@@ -281,6 +297,7 @@ app_launcher::clicked app_launcher::draw_gui(imgui_context & imgui_ctx, const st
 
 void app_launcher::operator()(to_headset::application_list && apps)
 {
+	application_list_request_time = {};
 	std::ranges::sort(apps.applications, [](auto & l, auto & r) {
 		return una::casesens::collate_utf8(l.name, r.name) < 0;
 	});
@@ -303,4 +320,17 @@ void app_launcher::operator()(to_headset::application_icon && icon)
 	auto locked = applications.lock();
 	if (auto it = std::ranges::find(*locked, icon.id, &app::id); it != locked->end())
 		it->image = std::move(icon.image);
+}
+
+void app_launcher::operator()(to_headset::application_launch_result && result)
+{
+	if (not pending_app_id or *pending_app_id != result.id)
+		return;
+
+	if (result.accepted)
+		return;
+
+	start_time = {};
+	pending_app_id.reset();
+	launch_error = result.message.empty() ? _S("The server could not start this application") : std::move(result.message);
 }

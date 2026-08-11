@@ -20,6 +20,7 @@
 // Copyright 2025-2026, NVIDIA CORPORATION.
 
 #include "compositor.h"
+#include "spatial_upscaling.h"
 
 // Monado includes
 #include "driver/xrt_cast.h"
@@ -716,13 +717,30 @@ compositor::compositor(wivrn_session & session) :
         squasher(vk, render_extent(session.get_info())),
         foveation(vk, images[0].image.info().extent)
 {
+	const auto & info = session.get_info();
+	const auto encoded = align_video_extent(transport_extent(info));
+	const auto algorithm = spatial_upscaling_name(info.spatial_upscaling);
+	U_LOG_IFL_I(log_level,
+	            "Spatial stream configuration: algorithm=%.*s game=%ux%u stream=%ux%u encoded=%ux%u target=%ux%u bitrate base/effective=%u/%u",
+	            int(algorithm.size()),
+	            algorithm.data(),
+	            info.render_eye_width,
+	            info.render_eye_height,
+	            info.stream_eye_width,
+	            info.stream_eye_height,
+	            encoded[0],
+	            encoded[1],
+	            info.target_eye_width,
+	            info.target_eye_height,
+	            info.settings.bitrate_bps,
+	            info.settings.effective_bitrate_bps);
 	if (fsr_upscaling_enabled(session.get_info()))
 	{
 		try
 		{
 			spatial_upscaler.emplace(vk,
-			                           render_extent(session.get_info()),
-			                           fsr_output_extent(session.get_info()));
+			                         render_extent(session.get_info()),
+			                         fsr_output_extent(session.get_info()));
 			const auto input = spatial_upscaler->input_size();
 			const auto output = spatial_upscaler->output_size();
 			U_LOG_IFL_I(log_level,
@@ -741,7 +759,7 @@ compositor::compositor(wivrn_session & session) :
 			            e.what());
 		}
 	}
-	else if (session.get_info().fsr_upscaling)
+	else if (session.get_info().spatial_upscaling == from_headset::spatial_upscaling_mode::fsr1_pc)
 	{
 		U_LOG_IFL_W(log_level,
 		            "FSR 1 spatial upscaling requested with unsupported dimensions; using normal composition");

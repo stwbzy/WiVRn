@@ -67,9 +67,11 @@ public:
 	float preferred_refresh_rate = 0;
 	std::optional<float> minimum_refresh_rate;
 	float resolution_scale = 1.0;
-	bool fsr_upscaling = false;
+	float target_resolution_scale = 1.0;
+	wivrn::from_headset::spatial_upscaling_mode spatial_upscaling = wivrn::from_headset::spatial_upscaling_mode::off;
 	std::optional<wivrn::video_codec> codec;
 	uint32_t bitrate_bps = 50'000'000;
+	wivrn::from_headset::bitrate_mode bitrate = wivrn::from_headset::bitrate_mode::automatic;
 	uint8_t bit_depth = 10;
 
 	bool passthrough_enabled = false;
@@ -143,11 +145,6 @@ public:
 	void set_stream_scale(float);
 	float get_stream_scale() const;
 	float get_default_stream_scale() const;
-
-	bool use_fsr_upscaling() const
-	{
-		return fsr_upscaling && resolution_scale > 0.0f && resolution_scale < 1.0f;
-	}
 
 	uint32_t max_bitrate(bool extended) const
 	{

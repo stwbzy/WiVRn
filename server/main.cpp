@@ -18,6 +18,7 @@
 #include "exit_codes.h"
 #include "ipc_server_cb.h"
 #include "protocol_version.h"
+#include "spatial_upscaling.h"
 #include "start_application.h"
 #include "utils/overloaded.h"
 #include "version.h"
@@ -183,8 +184,9 @@ const AvahiPoll * poll_api;
 
 guint server_watch;
 guint server_kill_watch;
-pid_t server_pid;
+pid_t server_pid = -1;
 std::optional<std::jthread> connection_thread;
+std::optional<std::jthread> in_process_server_thread;
 
 std::unique_ptr<children_manager> children;
 
@@ -228,7 +230,7 @@ void expose_connection_state()
 }
 
 void set_connection_state(wivrn::server_connection_state state,
-	                      wivrn::connection_close_reason reason = wivrn::connection_close_reason::none)
+                          wivrn::connection_close_reason reason = wivrn::connection_close_reason::none)
 {
 	if (state == detailed_connection_state && reason == detailed_connection_reason)
 		return;
@@ -254,10 +256,68 @@ void stop_publishing();
 
 void update_fsm();
 
+int run_server(configuration config)
+{
+	setenv("AMD_DEBUG", "lowlatencyenc", false);
+
+	// https://github.com/WiVRn/WiVRn/issues/695
+	// something is broken with Intel CCS under vaapi
+	setenv("INTEL_DEBUG", "noccs", false);
+
+	setenv("XRT_LOG", "info", false);
+
+	wivrn::ipc_server_cb server_cb;
+
+	ipc_server_main_info server_info{
+	        .udgci = {
+	                .window_title = "WiVRn",
+#if WIVRN_FEATURE_DEBUG_GUI
+	                .open = (config.debug_gui or show_debug_gui) ? U_DEBUG_GUI_OPEN_ALWAYS : U_DEBUG_GUI_OPEN_AUTO,
+#else
+	                .open = U_DEBUG_GUI_OPEN_NEVER,
+#endif
+	        },
+	        .no_stdin = true,
+	};
+
+	try
+	{
+		return ipc_server_main_common(&server_info, &server_cb, nullptr);
+	}
+	catch (std::exception & e)
+	{
+		std::cerr << e.what() << std::endl;
+		return EXIT_FAILURE;
+	}
+}
+
 void start_server(configuration config)
 {
-	server_pid = do_fork ? fork() : 0;
+	if (!do_fork)
+	{
+		// Monado supports running its IPC service on a worker thread. Keeping
+		// GLib on the main thread is required so headset-disconnected events can
+		// republish mDNS, and so D-Bus and shutdown remain responsive.
+		if (do_active_runtime)
+			runtime_setter.emplace();
 
+		assert(!in_process_server_thread);
+		wivrn_server_set_session_running(dbus_server, true);
+		in_process_server_thread.emplace([config = std::move(config)] {
+			const int status = run_server(config);
+			g_main_context_invoke(nullptr, [](void * data) -> gboolean {
+				const int status = GPOINTER_TO_INT(data);
+				in_process_server_thread.reset();
+				wivrn_server_set_session_running(dbus_server, false);
+				std::cerr << "Server thread exited, exit status " << status << std::endl;
+				update_fsm();
+				return G_SOURCE_REMOVE;
+			}, GINT_TO_POINTER(status));
+		});
+		return;
+	}
+
+	server_pid = fork();
 	if (server_pid < 0)
 	{
 		perror("fork");
@@ -265,39 +325,7 @@ void start_server(configuration config)
 	}
 	else if (server_pid == 0)
 	{
-		setenv("AMD_DEBUG", "lowlatencyenc", false);
-
-		// https://github.com/WiVRn/WiVRn/issues/695
-		// something is broken with Intel CCS under vaapi
-		setenv("INTEL_DEBUG", "noccs", false);
-
-		setenv("XRT_LOG", "info", false);
-
-		wivrn::ipc_server_cb server_cb;
-
-		ipc_server_main_info server_info{
-		        .udgci = {
-		                .window_title = "WiVRn",
-#if WIVRN_FEATURE_DEBUG_GUI
-		                .open = (config.debug_gui or show_debug_gui) ? U_DEBUG_GUI_OPEN_ALWAYS : U_DEBUG_GUI_OPEN_AUTO,
-#else
-		                .open = U_DEBUG_GUI_OPEN_NEVER,
-#endif
-		        },
-		        .no_stdin = true,
-		};
-
-		try
-		{
-			exit(ipc_server_main_common(&server_info, &server_cb, nullptr));
-		}
-		catch (std::exception & e)
-		{
-			std::cerr << e.what() << std::endl;
-			exit(EXIT_FAILURE);
-		}
-
-		__builtin_unreachable();
+		exit(run_server(std::move(config)));
 	}
 	else
 	{
@@ -326,6 +354,8 @@ void start_server(configuration config)
 void kill_server()
 {
 	wivrn_ipc_socket_main_loop->send(to_monado::stop{});
+	if (!do_fork)
+		return;
 
 	// Send SIGTERM after 1s if it is still running
 	server_kill_watch = g_timeout_add(1000, [](void *) {
@@ -392,7 +422,7 @@ void stop_publishing()
 
 void update_fsm()
 {
-	bool server_running = server_watch != 0 or connection_thread;
+	bool server_running = server_watch != 0 or connection_thread or in_process_server_thread;
 	bool app_running = children->running();
 
 	if (quitting_main_loop)
@@ -466,7 +496,11 @@ gboolean headset_connected_success(void *)
 
 	delay_next_try = default_delay_next_try;
 
-	connection.reset();
+	// The forked server owns a private copy, so the parent can release its
+	// handshake connection. In --no-fork mode the worker thread moves this
+	// exact object into wivrn_session; resetting it here races that move.
+	if (do_fork)
+		connection.reset();
 	return G_SOURCE_REMOVE;
 }
 
@@ -496,6 +530,7 @@ gboolean headset_connected_incorrect_pin(void *)
 gboolean headset_connected(gint fd, GIOCondition condition, gpointer user_data)
 {
 	assert(server_watch == 0);
+	assert(not in_process_server_thread);
 	assert(not children->running());
 	assert(not connection_thread);
 	assert(listener);
@@ -538,52 +573,72 @@ gboolean control_received(gint fd, GIOCondition condition, gpointer user_data)
 	if (packet)
 	{
 		std::visit(utils::overloaded{
-			                   [&](const wivrn::from_headset::headset_info_packet & info) {
-				                   on_headset_info_packet(info);
-				                   inhibitor.emplace();
-			                   },
+		                   [&](const wivrn::from_headset::headset_info_packet & info) {
+			                   on_headset_info_packet(info);
+			                   inhibitor.emplace();
+		                   },
 		                   [&](const wivrn::from_headset::settings_changed & settings) {
 			                   wivrn_server_set_preferred_refresh_rate(dbus_server, settings.preferred_refresh_rate);
-			                   wivrn_server_set_bitrate(dbus_server, settings.bitrate_bps);
+			                   wivrn_server_set_bitrate(dbus_server, wivrn::selected_bitrate(settings));
 		                   },
 		                   [&](const wivrn::from_headset::start_app & request) {
 			                   const auto & apps = list_applications();
 			                   if (auto it = apps.find(request.app_id); it != apps.end())
 			                   {
+				                   std::cerr << "Application launch requested: " << it->second.name.at("")
+				                             << " (" << request.app_id << ")" << std::endl;
 				                   try
 				                   {
 					                   children->start_application(it->second.exec, it->second.path);
+					                   wivrn_ipc_socket_main_loop->send(wivrn::to_headset::application_launch_result{
+					                           .id = request.app_id,
+					                           .accepted = true,
+					                   });
 				                   }
 				                   catch (std::exception & e)
 				                   {
 					                   std::cerr << "Failed to launch application " << it->second.name.at("") << ": " << e.what() << std::endl;
+					                   wivrn_ipc_socket_main_loop->send(wivrn::to_headset::application_launch_result{
+					                           .id = request.app_id,
+					                           .accepted = false,
+					                           .message = e.what(),
+					                   });
 				                   }
 			                   }
+			                   else
+			                   {
+				                   std::cerr << "Application launch rejected: unknown id " << request.app_id << std::endl;
+				                   wivrn_ipc_socket_main_loop->send(wivrn::to_headset::application_launch_result{
+				                           .id = request.app_id,
+				                           .accepted = false,
+				                           .message = "Application is no longer available on the server",
+				                   });
+			                   }
 		                   },
-			                   [&](const from_monado::headset_connected &) {
-				                   stop_publishing();
-				                   inhibitor.emplace();
-				                   wivrn_server_set_headset_connected(dbus_server, true);
-			                   },
+		                   [&](const from_monado::headset_connected &) {
+			                   stop_publishing();
+			                   inhibitor.emplace();
+			                   wivrn_server_set_headset_connected(dbus_server, true);
+		                   },
 		                   [&](const from_monado::headset_disconnected &) {
 			                   start_publishing();
 			                   inhibitor.reset();
 			                   wivrn_server_set_headset_connected(dbus_server, false);
-				                   wivrn_server_set_client_tab(dbus_server, "");
-			                   },
-			                   [&](const from_monado::connection_state_changed & event) {
-				                   detailed_connection_state = event.state;
-				                   detailed_connection_reason = event.reason;
-				                   connection_generation = event.generation;
-				                   connection_stats = event.counters;
-				                   connection_stats.attempts = initial_connection_attempts + (event.counters.attempts ? event.counters.attempts - 1 : 0);
-				                   expose_connection_state();
-			                   },
-			                   [&](const from_monado::connection_counters_changed & event) {
-				                   connection_stats = event.counters;
-				                   connection_stats.attempts = initial_connection_attempts + (event.counters.attempts ? event.counters.attempts - 1 : 0);
-				                   expose_connection_state();
-			                   },
+			                   wivrn_server_set_client_tab(dbus_server, "");
+		                   },
+		                   [&](const from_monado::connection_state_changed & event) {
+			                   detailed_connection_state = event.state;
+			                   detailed_connection_reason = event.reason;
+			                   connection_generation = event.generation;
+			                   connection_stats = event.counters;
+			                   connection_stats.attempts = initial_connection_attempts + (event.counters.attempts ? event.counters.attempts - 1 : 0);
+			                   expose_connection_state();
+		                   },
+		                   [&](const from_monado::connection_counters_changed & event) {
+			                   connection_stats = event.counters;
+			                   connection_stats.attempts = initial_connection_attempts + (event.counters.attempts ? event.counters.attempts - 1 : 0);
+			                   expose_connection_state();
+		                   },
 		                   [&](const wivrn::from_headset::stream_tab_changed & event) {
 			                   wivrn_server_set_client_tab(dbus_server, magic_enum::enum_name(event.tab).data());
 		                   },
@@ -661,8 +716,8 @@ gboolean on_handle_disconnect(WivrnServer * skeleton,
 }
 
 gboolean on_handle_disconnect_with_mode(WivrnServer * skeleton,
-	                                     GDBusMethodInvocation * invocation,
-	                                     gpointer user_data)
+                                        GDBusMethodInvocation * invocation,
+                                        gpointer user_data)
 {
 	GVariant * args = g_dbus_method_invocation_get_parameters(invocation);
 	const char * value = nullptr;
@@ -855,7 +910,7 @@ void on_headset_info_packet(const wivrn::from_headset::headset_info_packet & inf
 
 	wivrn_server_set_preferred_refresh_rate(dbus_server, info.settings.preferred_refresh_rate);
 
-	wivrn_server_set_bitrate(dbus_server, info.settings.bitrate_bps);
+	wivrn_server_set_bitrate(dbus_server, wivrn::selected_bitrate(info.settings));
 
 	auto speaker = info.speaker.value_or(wivrn::from_headset::headset_info_packet::audio_description{});
 	wivrn_server_set_speaker_channels(dbus_server, speaker.num_channels);

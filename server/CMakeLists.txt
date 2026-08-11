@@ -90,6 +90,7 @@ FetchContent_MakeAvailable(monado)
 
 if (WIVRN_BUILD_SERVER)
 	add_executable(wivrn-server
+			../common/spatial_upscaling.cpp
 			accept_connection.cpp
 			active_runtime.cpp
 			avahi_publisher.cpp
@@ -140,6 +141,9 @@ if (WIVRN_BUILD_SERVER)
 			utils/wivrn_trace.cpp
 			utils/gpu_timestamp_pool.cpp
 		)
+	# The build-tree OpenXR manifest references both runtime libraries. Keep
+	# their generated git tag synchronized even for server-only builds.
+	add_dependencies(wivrn-server openxr_wivrn monado)
 	target_compile_features(wivrn-server PRIVATE cxx_std_20)
 	target_compile_definitions(wivrn-server PRIVATE VULKAN_HPP_NO_CONSTRUCTORS)
 
@@ -289,17 +293,18 @@ if (WIVRN_BUILD_SERVER)
 
 	if(WIVRN_BUILD_TEST)
 		add_executable(fsr-config-test
+			../common/spatial_upscaling.cpp
 			compositor/fsr_config.cpp
 			compositor/fsr_config_test.cpp)
 		target_compile_features(fsr-config-test PRIVATE cxx_std_20)
 		target_include_directories(fsr-config-test PRIVATE .)
-		target_link_libraries(fsr-config-test PRIVATE wivrn-common wivrn-external)
+		target_link_libraries(fsr-config-test PRIVATE xrt-external-openxr wivrn-common wivrn-external)
 		add_test(NAME fsr-config COMMAND fsr-config-test)
 
 		add_executable(tracking-history-test driver/history_test.cpp)
 		target_compile_features(tracking-history-test PRIVATE cxx_std_20)
 		target_include_directories(tracking-history-test PRIVATE .)
-		target_link_libraries(tracking-history-test PRIVATE aux_util wivrn-common wivrn-external)
+		target_link_libraries(tracking-history-test PRIVATE aux_util xrt-external-openxr wivrn-common wivrn-external)
 		add_test(NAME tracking-history COMMAND tracking-history-test)
 
 		add_executable(virtual-tracker-dropout-filter-test driver/virtual_tracker_dropout_filter_test.cpp)

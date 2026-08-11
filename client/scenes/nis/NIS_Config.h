@@ -1,0 +1,408 @@
+// The MIT License(MIT)
+//
+// Copyright(c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of
+// this software and associated documentation files(the "Software"), to deal in
+// the Software without restriction, including without limitation the rights to
+// use, copy, modify, merge, publish, distribute, sublicense, and / or sell copies of
+// the Software, and to permit persons to whom the Software is furnished to do so,
+// subject to the following conditions :
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+// FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE AUTHORS OR
+// COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+// IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+// CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+//---------------------------------------------------------------------------------
+// NVIDIA Image Scaling SDK  - v1.0.3
+//---------------------------------------------------------------------------------
+// Configuration
+//---------------------------------------------------------------------------------
+
+#pragma once
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+
+#ifndef NIS_ALIGNED
+#if defined(_MSC_VER)
+#define NIS_ALIGNED(x) __declspec(align(x))
+#else
+#if defined(__GNUC__)
+#define NIS_ALIGNED(x) __attribute__ ((aligned(x)))
+#endif
+#endif
+#endif
+
+
+struct NIS_ALIGNED(256) NISConfig
+{
+    float kDetectRatio;
+    float kDetectThres;
+    float kMinContrastRatio;
+    float kRatioNorm;
+
+    float kContrastBoost;
+    float kEps;
+    float kSharpStartY;
+    float kSharpScaleY;
+
+    float kSharpStrengthMin;
+    float kSharpStrengthScale;
+    float kSharpLimitMin;
+    float kSharpLimitScale;
+
+    float kScaleX;
+    float kScaleY;
+    float kDstNormX;
+    float kDstNormY;
+
+    float kSrcNormX;
+    float kSrcNormY;
+
+    uint32_t kInputViewportOriginX;
+    uint32_t kInputViewportOriginY;
+    uint32_t kInputViewportWidth;
+    uint32_t kInputViewportHeight;
+
+    uint32_t kOutputViewportOriginX;
+    uint32_t kOutputViewportOriginY;
+    uint32_t kOutputViewportWidth;
+    uint32_t kOutputViewportHeight;
+
+    float reserved0;
+    float reserved1;
+};
+
+enum class NISHDRMode : uint32_t
+{
+    None = 0,
+    Linear = 1,
+    PQ = 2
+};
+
+enum class NISGPUArchitecture : uint32_t
+{
+    NVIDIA_Generic = 0,
+    AMD_Generic = 1,
+    Intel_Generic = 2,
+    NVIDIA_Generic_fp16 = 3
+};
+
+struct NISOptimizer
+{
+    bool isUpscaling;
+    NISGPUArchitecture gpuArch;
+
+    constexpr NISOptimizer(bool isUpscaling = true, NISGPUArchitecture gpuArch = NISGPUArchitecture::NVIDIA_Generic)
+        : isUpscaling(isUpscaling)
+        , gpuArch(gpuArch)
+    {}
+
+    constexpr uint32_t GetOptimalBlockWidth()
+    {
+        switch (gpuArch) {
+        case NISGPUArchitecture::NVIDIA_Generic:
+            return 32;
+        case NISGPUArchitecture::NVIDIA_Generic_fp16:
+            return 32;
+        case NISGPUArchitecture::AMD_Generic:
+            return 32;
+        case NISGPUArchitecture::Intel_Generic:
+            return 32;
+        }
+        return 32;
+    }
+
+    constexpr uint32_t GetOptimalBlockHeight()
+    {
+        switch (gpuArch) {
+        case NISGPUArchitecture::NVIDIA_Generic:
+            return isUpscaling ? 24 : 32;
+        case NISGPUArchitecture::NVIDIA_Generic_fp16:
+            return isUpscaling ? 32 : 32;
+        case NISGPUArchitecture::AMD_Generic:
+            return isUpscaling ? 24 : 32;
+        case NISGPUArchitecture::Intel_Generic:
+            return isUpscaling ? 24 : 32;
+        }
+        return isUpscaling ? 24 : 32;
+    }
+
+    constexpr uint32_t GetOptimalThreadGroupSize()
+    {
+        switch (gpuArch) {
+        case NISGPUArchitecture::NVIDIA_Generic:
+            return 128;
+        case NISGPUArchitecture::NVIDIA_Generic_fp16:
+            return 128;
+        case NISGPUArchitecture::AMD_Generic:
+            return 256;
+        case NISGPUArchitecture::Intel_Generic:
+            return 256;
+        }
+        return 256;
+    }
+};
+
+
+inline bool NVScalerUpdateConfig(NISConfig& config, float sharpness,
+    uint32_t inputViewportOriginX, uint32_t inputViewportOriginY,
+    uint32_t inputViewportWidth, uint32_t inputViewportHeight,
+    uint32_t inputTextureWidth, uint32_t inputTextureHeight,
+    uint32_t outputViewportOriginX, uint32_t outputViewportOriginY,
+    uint32_t outputViewportWidth, uint32_t outputViewportHeight,
+    uint32_t outputTextureWidth, uint32_t outputTextureHeight,
+    NISHDRMode hdrMode = NISHDRMode::None)
+{
+    // adjust params based on value from sharpness slider
+    sharpness = std::max<float>(std::min<float>(1.f, sharpness), 0.f);
+    float sharpen_slider = sharpness - 0.5f;   // Map 0 to 1 to -0.5 to +0.5
+
+    // Different range for 0 to 50% vs 50% to 100%
+    // The idea is to make sure sharpness of 0% map to no-sharpening,
+    // while also ensuring that sharpness of 100% doesn't cause too much over-sharpening.
+    const float MaxScale = (sharpen_slider >= 0.0f) ? 1.25f : 1.75f;
+    const float MinScale = (sharpen_slider >= 0.0f) ? 1.25f : 1.0f;
+    const float LimitScale = (sharpen_slider >= 0.0f) ? 1.25f : 1.0f;
+
+    float kDetectRatio = 2 * 1127.f / 1024.f;
+
+    // Params for SDR
+    float kDetectThres = 64.0f / 1024.0f;
+    float kMinContrastRatio = 2.0f;
+    float kMaxContrastRatio = 10.0f;
+
+    float kSharpStartY = 0.45f;
+    float kSharpEndY = 0.9f;
+    float kSharpStrengthMin = std::max<float>(0.0f, 0.4f + sharpen_slider * MinScale * 1.2f);
+    float kSharpStrengthMax = 1.6f + sharpen_slider * MaxScale * 1.8f;
+    float kSharpLimitMin = std::max<float>(0.1f, 0.14f + sharpen_slider * LimitScale * 0.32f);
+    float kSharpLimitMax = 0.5f + sharpen_slider * LimitScale * 0.6f;
+
+    if (hdrMode == NISHDRMode::Linear || hdrMode == NISHDRMode::PQ)
+    {
+        kDetectThres = 32.0f / 1024.0f;
+
+        kMinContrastRatio = 1.5f;
+        kMaxContrastRatio = 5.0f;
+
+        kSharpStrengthMin = std::max<float>(0.0f, 0.4f + sharpen_slider * MinScale * 1.1f);
+        kSharpStrengthMax = 2.2f + sharpen_slider * MaxScale * 1.8f;
+        kSharpLimitMin = std::max<float>(0.06f, 0.10f + sharpen_slider * LimitScale * 0.28f);
+        kSharpLimitMax = 0.6f + sharpen_slider * LimitScale * 0.6f;
+
+        if (hdrMode == NISHDRMode::PQ)
+        {
+            kSharpStartY = 0.35f;
+            kSharpEndY = 0.55f;
+        }
+        else
+        {
+            kSharpStartY = 0.3f;
+            kSharpEndY = 0.5f;
+        }
+    }
+
+    float kRatioNorm = 1.0f / (kMaxContrastRatio - kMinContrastRatio);
+    float kSharpScaleY = 1.0f / (kSharpEndY - kSharpStartY);
+    float kSharpStrengthScale = kSharpStrengthMax - kSharpStrengthMin;
+    float kSharpLimitScale = kSharpLimitMax - kSharpLimitMin;
+
+    config.kInputViewportWidth = inputViewportWidth == 0 ? inputTextureWidth : inputViewportWidth;
+    config.kInputViewportHeight = inputViewportHeight == 0 ? inputTextureHeight : inputViewportHeight;
+    config.kOutputViewportWidth = outputViewportWidth == 0 ? outputTextureWidth : outputViewportWidth;
+    config.kOutputViewportHeight = outputViewportHeight == 0 ? outputTextureHeight : outputViewportHeight;
+    if (config.kInputViewportWidth == 0 || config.kInputViewportHeight == 0 ||
+        config.kOutputViewportWidth == 0 || config.kOutputViewportHeight == 0)
+        return false;
+
+    config.kInputViewportOriginX = inputViewportOriginX;
+    config.kInputViewportOriginY = inputViewportOriginY;
+    config.kOutputViewportOriginX = outputViewportOriginX;
+    config.kOutputViewportOriginY = outputViewportOriginY;
+
+    config.kSrcNormX = 1.f / inputTextureWidth;
+    config.kSrcNormY = 1.f / inputTextureHeight;
+    config.kDstNormX = 1.f / outputTextureWidth;
+    config.kDstNormY = 1.f / outputTextureHeight;
+    config.kScaleX = config.kInputViewportWidth / float(config.kOutputViewportWidth);
+    config.kScaleY = config.kInputViewportHeight / float(config.kOutputViewportHeight);
+    config.kDetectRatio = kDetectRatio;
+    config.kDetectThres = kDetectThres;
+    config.kMinContrastRatio = kMinContrastRatio;
+    config.kRatioNorm = kRatioNorm;
+    config.kContrastBoost = 1.0f;
+    config.kEps = 1.0f / 255.0f;
+    config.kSharpStartY = kSharpStartY;
+    config.kSharpScaleY = kSharpScaleY;
+    config.kSharpStrengthMin = kSharpStrengthMin;
+    config.kSharpStrengthScale = kSharpStrengthScale;
+    config.kSharpLimitMin = kSharpLimitMin;
+    config.kSharpLimitScale = kSharpLimitScale;
+
+    if (config.kScaleX < 0.5f || config.kScaleX > 1.f || config.kScaleY < 0.5f || config.kScaleY > 1.f)
+        return false;
+    return true;
+}
+
+
+inline bool NVSharpenUpdateConfig(NISConfig& config, float sharpness,
+    uint32_t inputViewportOriginX, uint32_t inputViewportOriginY,
+    uint32_t inputViewportWidth, uint32_t inputViewportHeight,
+    uint32_t inputTextureWidth, uint32_t inputTextureHeight,
+    uint32_t outputViewportOriginX, uint32_t outputViewportOriginY,
+    NISHDRMode hdrMode = NISHDRMode::None)
+{
+    return NVScalerUpdateConfig(config, sharpness,
+            inputViewportOriginX, inputViewportOriginY, inputViewportWidth, inputViewportHeight, inputTextureWidth, inputTextureHeight,
+            outputViewportOriginX, outputViewportOriginY, inputViewportWidth, inputViewportHeight, inputTextureWidth, inputTextureHeight,
+            hdrMode);
+}
+
+namespace {
+    constexpr size_t kPhaseCount = 64;
+    constexpr size_t kFilterSize = 8;
+
+    constexpr float coef_scale[kPhaseCount][kFilterSize] = {
+        {0.0f,     0.0f,    1.0000f, 0.0f,     0.0f,    0.0f, 0.0f, 0.0f},
+        {0.0029f, -0.0127f, 1.0000f, 0.0132f, -0.0034f, 0.0f, 0.0f, 0.0f},
+        {0.0063f, -0.0249f, 0.9985f, 0.0269f, -0.0068f, 0.0f, 0.0f, 0.0f},
+        {0.0088f, -0.0361f, 0.9956f, 0.0415f, -0.0103f, 0.0005f, 0.0f, 0.0f},
+        {0.0117f, -0.0474f, 0.9932f, 0.0562f, -0.0142f, 0.0005f, 0.0f, 0.0f},
+        {0.0142f, -0.0576f, 0.9897f, 0.0713f, -0.0181f, 0.0005f, 0.0f, 0.0f},
+        {0.0166f, -0.0674f, 0.9844f, 0.0874f, -0.0220f, 0.0010f, 0.0f, 0.0f},
+        {0.0186f, -0.0762f, 0.9785f, 0.1040f, -0.0264f, 0.0015f, 0.0f, 0.0f},
+        {0.0205f, -0.0850f, 0.9727f, 0.1206f, -0.0308f, 0.0020f, 0.0f, 0.0f},
+        {0.0225f, -0.0928f, 0.9648f, 0.1382f, -0.0352f, 0.0024f, 0.0f, 0.0f},
+        {0.0239f, -0.1006f, 0.9575f, 0.1558f, -0.0396f, 0.0029f, 0.0f, 0.0f},
+        {0.0254f, -0.1074f, 0.9487f, 0.1738f, -0.0439f, 0.0034f, 0.0f, 0.0f},
+        {0.0264f, -0.1138f, 0.9390f, 0.1929f, -0.0488f, 0.0044f, 0.0f, 0.0f},
+        {0.0278f, -0.1191f, 0.9282f, 0.2119f, -0.0537f, 0.0049f, 0.0f, 0.0f},
+        {0.0288f, -0.1245f, 0.9170f, 0.2310f, -0.0581f, 0.0059f, 0.0f, 0.0f},
+        {0.0293f, -0.1294f, 0.9058f, 0.2510f, -0.0630f, 0.0063f, 0.0f, 0.0f},
+        {0.0303f, -0.1333f, 0.8926f, 0.2710f, -0.0679f, 0.0073f, 0.0f, 0.0f},
+        {0.0308f, -0.1367f, 0.8789f, 0.2915f, -0.0728f, 0.0083f, 0.0f, 0.0f},
+        {0.0308f, -0.1401f, 0.8657f, 0.3120f, -0.0776f, 0.0093f, 0.0f, 0.0f},
+        {0.0313f, -0.1426f, 0.8506f, 0.3330f, -0.0825f, 0.0103f, 0.0f, 0.0f},
+        {0.0313f, -0.1445f, 0.8354f, 0.3540f, -0.0874f, 0.0112f, 0.0f, 0.0f},
+        {0.0313f, -0.1460f, 0.8193f, 0.3755f, -0.0923f, 0.0122f, 0.0f, 0.0f},
+        {0.0313f, -0.1470f, 0.8022f, 0.3965f, -0.0967f, 0.0137f, 0.0f, 0.0f},
+        {0.0308f, -0.1479f, 0.7856f, 0.4185f, -0.1016f, 0.0146f, 0.0f, 0.0f},
+        {0.0303f, -0.1479f, 0.7681f, 0.4399f, -0.1060f, 0.0156f, 0.0f, 0.0f},
+        {0.0298f, -0.1479f, 0.7505f, 0.4614f, -0.1104f, 0.0166f, 0.0f, 0.0f},
+        {0.0293f, -0.1470f, 0.7314f, 0.4829f, -0.1147f, 0.0181f, 0.0f, 0.0f},
+        {0.0288f, -0.1460f, 0.7119f, 0.5049f, -0.1187f, 0.0190f, 0.0f, 0.0f},
+        {0.0278f, -0.1445f, 0.6929f, 0.5264f, -0.1226f, 0.0200f, 0.0f, 0.0f},
+        {0.0273f, -0.1431f, 0.6724f, 0.5479f, -0.1260f, 0.0215f, 0.0f, 0.0f},
+        {0.0264f, -0.1411f, 0.6528f, 0.5693f, -0.1299f, 0.0225f, 0.0f, 0.0f},
+        {0.0254f, -0.1387f, 0.6323f, 0.5903f, -0.1328f, 0.0234f, 0.0f, 0.0f},
+        {0.0244f, -0.1357f, 0.6113f, 0.6113f, -0.1357f, 0.0244f, 0.0f, 0.0f},
+        {0.0234f, -0.1328f, 0.5903f, 0.6323f, -0.1387f, 0.0254f, 0.0f, 0.0f},
+        {0.0225f, -0.1299f, 0.5693f, 0.6528f, -0.1411f, 0.0264f, 0.0f, 0.0f},
+        {0.0215f, -0.1260f, 0.5479f, 0.6724f, -0.1431f, 0.0273f, 0.0f, 0.0f},
+        {0.0200f, -0.1226f, 0.5264f, 0.6929f, -0.1445f, 0.0278f, 0.0f, 0.0f},
+        {0.0190f, -0.1187f, 0.5049f, 0.7119f, -0.1460f, 0.0288f, 0.0f, 0.0f},
+        {0.0181f, -0.1147f, 0.4829f, 0.7314f, -0.1470f, 0.0293f, 0.0f, 0.0f},
+        {0.0166f, -0.1104f, 0.4614f, 0.7505f, -0.1479f, 0.0298f, 0.0f, 0.0f},
+        {0.0156f, -0.1060f, 0.4399f, 0.7681f, -0.1479f, 0.0303f, 0.0f, 0.0f},
+        {0.0146f, -0.1016f, 0.4185f, 0.7856f, -0.1479f, 0.0308f, 0.0f, 0.0f},
+        {0.0137f, -0.0967f, 0.3965f, 0.8022f, -0.1470f, 0.0313f, 0.0f, 0.0f},
+        {0.0122f, -0.0923f, 0.3755f, 0.8193f, -0.1460f, 0.0313f, 0.0f, 0.0f},
+        {0.0112f, -0.0874f, 0.3540f, 0.8354f, -0.1445f, 0.0313f, 0.0f, 0.0f},
+        {0.0103f, -0.0825f, 0.3330f, 0.8506f, -0.1426f, 0.0313f, 0.0f, 0.0f},
+        {0.0093f, -0.0776f, 0.3120f, 0.8657f, -0.1401f, 0.0308f, 0.0f, 0.0f},
+        {0.0083f, -0.0728f, 0.2915f, 0.8789f, -0.1367f, 0.0308f, 0.0f, 0.0f},
+        {0.0073f, -0.0679f, 0.2710f, 0.8926f, -0.1333f, 0.0303f, 0.0f, 0.0f},
+        {0.0063f, -0.0630f, 0.2510f, 0.9058f, -0.1294f, 0.0293f, 0.0f, 0.0f},
+        {0.0059f, -0.0581f, 0.2310f, 0.9170f, -0.1245f, 0.0288f, 0.0f, 0.0f},
+        {0.0049f, -0.0537f, 0.2119f, 0.9282f, -0.1191f, 0.0278f, 0.0f, 0.0f},
+        {0.0044f, -0.0488f, 0.1929f, 0.9390f, -0.1138f, 0.0264f, 0.0f, 0.0f},
+        {0.0034f, -0.0439f, 0.1738f, 0.9487f, -0.1074f, 0.0254f, 0.0f, 0.0f},
+        {0.0029f, -0.0396f, 0.1558f, 0.9575f, -0.1006f, 0.0239f, 0.0f, 0.0f},
+        {0.0024f, -0.0352f, 0.1382f, 0.9648f, -0.0928f, 0.0225f, 0.0f, 0.0f},
+        {0.0020f, -0.0308f, 0.1206f, 0.9727f, -0.0850f, 0.0205f, 0.0f, 0.0f},
+        {0.0015f, -0.0264f, 0.1040f, 0.9785f, -0.0762f, 0.0186f, 0.0f, 0.0f},
+        {0.0010f, -0.0220f, 0.0874f, 0.9844f, -0.0674f, 0.0166f, 0.0f, 0.0f},
+        {0.0005f, -0.0181f, 0.0713f, 0.9897f, -0.0576f, 0.0142f, 0.0f, 0.0f},
+        {0.0005f, -0.0142f, 0.0562f, 0.9932f, -0.0474f, 0.0117f, 0.0f, 0.0f},
+        {0.0005f, -0.0103f, 0.0415f, 0.9956f, -0.0361f, 0.0088f, 0.0f, 0.0f},
+        {0.0f, -0.0068f, 0.0269f, 0.9985f, -0.0249f, 0.0063f, 0.0f, 0.0f},
+        {0.0f, -0.0034f, 0.0132f, 1.0000f, -0.0127f, 0.0029f, 0.0f, 0.0f}
+    };
+
+    constexpr float coef_usm[kPhaseCount][kFilterSize] = {
+        {0.0f,      -0.6001f, 1.2002f, -0.6001f,  0.0f,  0.0f, 0.0f, 0.0f},
+        {0.0029f, -0.6084f, 1.1987f, -0.5903f, -0.0029f, 0.0f, 0.0f, 0.0f},
+        {0.0049f, -0.6147f, 1.1958f, -0.5791f, -0.0068f, 0.0005f, 0.0f, 0.0f},
+        {0.0073f, -0.6196f, 1.1890f, -0.5659f, -0.0103f, 0.0f, 0.0f, 0.0f},
+        {0.0093f, -0.6235f, 1.1802f, -0.5513f, -0.0151f, 0.0f, 0.0f, 0.0f},
+        {0.0112f, -0.6265f, 1.1699f, -0.5352f, -0.0195f, 0.0005f, 0.0f, 0.0f},
+        {0.0122f, -0.6270f, 1.1582f, -0.5181f, -0.0259f, 0.0005f, 0.0f, 0.0f},
+        {0.0142f, -0.6284f, 1.1455f, -0.5005f, -0.0317f, 0.0005f, 0.0f, 0.0f},
+        {0.0156f, -0.6265f, 1.1274f, -0.4790f, -0.0386f, 0.0005f, 0.0f, 0.0f},
+        {0.0166f, -0.6235f, 1.1089f, -0.4570f, -0.0454f, 0.0010f, 0.0f, 0.0f},
+        {0.0176f, -0.6187f, 1.0879f, -0.4346f, -0.0532f, 0.0010f, 0.0f, 0.0f},
+        {0.0181f, -0.6138f, 1.0659f, -0.4102f, -0.0615f, 0.0015f, 0.0f, 0.0f},
+        {0.0190f, -0.6069f, 1.0405f, -0.3843f, -0.0698f, 0.0015f, 0.0f, 0.0f},
+        {0.0195f, -0.6006f, 1.0161f, -0.3574f, -0.0796f, 0.0020f, 0.0f, 0.0f},
+        {0.0200f, -0.5928f, 0.9893f, -0.3286f, -0.0898f, 0.0024f, 0.0f, 0.0f},
+        {0.0200f, -0.5820f, 0.9580f, -0.2988f, -0.1001f, 0.0029f, 0.0f, 0.0f},
+        {0.0200f, -0.5728f, 0.9292f, -0.2690f, -0.1104f, 0.0034f, 0.0f, 0.0f},
+        {0.0200f, -0.5620f, 0.8975f, -0.2368f, -0.1226f, 0.0039f, 0.0f, 0.0f},
+        {0.0205f, -0.5498f, 0.8643f, -0.2046f, -0.1343f, 0.0044f, 0.0f, 0.0f},
+        {0.0200f, -0.5371f, 0.8301f, -0.1709f, -0.1465f, 0.0049f, 0.0f, 0.0f},
+        {0.0195f, -0.5239f, 0.7944f, -0.1367f, -0.1587f, 0.0054f, 0.0f, 0.0f},
+        {0.0195f, -0.5107f, 0.7598f, -0.1021f, -0.1724f, 0.0059f, 0.0f, 0.0f},
+        {0.0190f, -0.4966f, 0.7231f, -0.0649f, -0.1865f, 0.0063f, 0.0f, 0.0f},
+        {0.0186f, -0.4819f, 0.6846f, -0.0288f, -0.1997f, 0.0068f, 0.0f, 0.0f},
+        {0.0186f, -0.4668f, 0.6460f, 0.0093f, -0.2144f, 0.0073f, 0.0f, 0.0f},
+        {0.0176f, -0.4507f, 0.6055f, 0.0479f, -0.2290f, 0.0083f, 0.0f, 0.0f},
+        {0.0171f, -0.4370f, 0.5693f, 0.0859f, -0.2446f, 0.0088f, 0.0f, 0.0f},
+        {0.0161f, -0.4199f, 0.5283f, 0.1255f, -0.2598f, 0.0098f, 0.0f, 0.0f},
+        {0.0161f, -0.4048f, 0.4883f, 0.1655f, -0.2754f, 0.0103f, 0.0f, 0.0f},
+        {0.0151f, -0.3887f, 0.4497f, 0.2041f, -0.2910f, 0.0107f, 0.0f, 0.0f},
+        {0.0142f, -0.3711f, 0.4072f, 0.2446f, -0.3066f, 0.0117f, 0.0f, 0.0f},
+        {0.0137f, -0.3555f, 0.3672f, 0.2852f, -0.3228f, 0.0122f, 0.0f, 0.0f},
+        {0.0132f, -0.3394f, 0.3262f, 0.3262f, -0.3394f, 0.0132f, 0.0f, 0.0f},
+        {0.0122f, -0.3228f, 0.2852f, 0.3672f, -0.3555f, 0.0137f, 0.0f, 0.0f},
+        {0.0117f, -0.3066f, 0.2446f, 0.4072f, -0.3711f, 0.0142f, 0.0f, 0.0f},
+        {0.0107f, -0.2910f, 0.2041f, 0.4497f, -0.3887f, 0.0151f, 0.0f, 0.0f},
+        {0.0103f, -0.2754f, 0.1655f, 0.4883f, -0.4048f, 0.0161f, 0.0f, 0.0f},
+        {0.0098f, -0.2598f, 0.1255f, 0.5283f, -0.4199f, 0.0161f, 0.0f, 0.0f},
+        {0.0088f, -0.2446f, 0.0859f, 0.5693f, -0.4370f, 0.0171f, 0.0f, 0.0f},
+        {0.0083f, -0.2290f, 0.0479f, 0.6055f, -0.4507f, 0.0176f, 0.0f, 0.0f},
+        {0.0073f, -0.2144f, 0.0093f, 0.6460f, -0.4668f, 0.0186f, 0.0f, 0.0f},
+        {0.0068f, -0.1997f, -0.0288f, 0.6846f, -0.4819f, 0.0186f, 0.0f, 0.0f},
+        {0.0063f, -0.1865f, -0.0649f, 0.7231f, -0.4966f, 0.0190f, 0.0f, 0.0f},
+        {0.0059f, -0.1724f, -0.1021f, 0.7598f, -0.5107f, 0.0195f, 0.0f, 0.0f},
+        {0.0054f, -0.1587f, -0.1367f, 0.7944f, -0.5239f, 0.0195f, 0.0f, 0.0f},
+        {0.0049f, -0.1465f, -0.1709f, 0.8301f, -0.5371f, 0.0200f, 0.0f, 0.0f},
+        {0.0044f, -0.1343f, -0.2046f, 0.8643f, -0.5498f, 0.0205f, 0.0f, 0.0f},
+        {0.0039f, -0.1226f, -0.2368f, 0.8975f, -0.5620f, 0.0200f, 0.0f, 0.0f},
+        {0.0034f, -0.1104f, -0.2690f, 0.9292f, -0.5728f, 0.0200f, 0.0f, 0.0f},
+        {0.0029f, -0.1001f, -0.2988f, 0.9580f, -0.5820f, 0.0200f, 0.0f, 0.0f},
+        {0.0024f, -0.0898f, -0.3286f, 0.9893f, -0.5928f, 0.0200f, 0.0f, 0.0f},
+        {0.0020f, -0.0796f, -0.3574f, 1.0161f, -0.6006f, 0.0195f, 0.0f, 0.0f},
+        {0.0015f, -0.0698f, -0.3843f, 1.0405f, -0.6069f, 0.0190f, 0.0f, 0.0f},
+        {0.0015f, -0.0615f, -0.4102f, 1.0659f, -0.6138f, 0.0181f, 0.0f, 0.0f},
+        {0.0010f, -0.0532f, -0.4346f, 1.0879f, -0.6187f, 0.0176f, 0.0f, 0.0f},
+        {0.0010f, -0.0454f, -0.4570f, 1.1089f, -0.6235f, 0.0166f, 0.0f, 0.0f},
+        {0.0005f, -0.0386f, -0.4790f, 1.1274f, -0.6265f, 0.0156f, 0.0f, 0.0f},
+        {0.0005f, -0.0317f, -0.5005f, 1.1455f, -0.6284f, 0.0142f, 0.0f, 0.0f},
+        {0.0005f, -0.0259f, -0.5181f, 1.1582f, -0.6270f, 0.0122f, 0.0f, 0.0f},
+        {0.0005f, -0.0195f, -0.5352f, 1.1699f, -0.6265f, 0.0112f, 0.0f, 0.0f},
+        {0.0f, -0.0151f, -0.5513f, 1.1802f, -0.6235f, 0.0093f, 0.0f, 0.0f},
+        {0.0f, -0.0103f, -0.5659f, 1.1890f, -0.6196f, 0.0073f, 0.0f, 0.0f},
+        {0.0005f, -0.0068f, -0.5791f, 1.1958f, -0.6147f, 0.0049f, 0.0f, 0.0f},
+        {0.0f, -0.0029f, -0.5903f, 1.1987f, -0.6084f, 0.0029f, 0.0f, 0.0f}
+    };
+
+} // namespace

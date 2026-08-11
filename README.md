@@ -26,9 +26,9 @@ and OpenXR applications.
 - **Frame generation removed:** the server has no temporal history, optical
   flow, candidate-frame, handoff, or double-rate path. Streaming remains one
   encoded frame per OpenXR frame.
-- **FSR 1 image reconstruction:** an opt-in two-pass FidelityFX EASU + RCAS
-  path reconstructs a reduced application render to the headset's recommended
-  per-eye resolution before WiVRn foveation and encoding.
+- **Configurable spatial reconstruction:** opt-in PC FSR1 or post-decode
+  SGSR1/FSR1/NIS on Quest reconstructs game resolution to an independent
+  headset target, with automatic bitrate and a bilinear safety fallback.
 
 > [!NOTE]
 > This fork does not embed AMD FidelityFX FSR 3. Spatial reconstruction is a
@@ -165,15 +165,14 @@ The same overrides should work for other VR applications distributed as Flatpaks
 
 See [building](docs/building.md) for building the [dashboard](docs/building.md#dashboard), [server (PC)](docs/building.md#server-pc), and [client (headset)](docs/building.md#client-headset)
 
-## FSR 1 spatial-upscaling fork
+## Spatial-upscaling fork
 
-This checkout contains an AMD FidelityFX FSR 1 spatial path: EASU
-reconstructs a reduced render to the headset's recommended resolution and
-RCAS sharpens it before WiVRn foveation/encoding. It is not FSR 3. The PC
-server contains no frame-generation backend. Enable **FSR 1 spatial
-upscaling** in the headset Video menu at a render resolution below 100%, then
-reconnect. Commands, expected logs, limitations, and the stability checklist
-are in [docs/fsr-spatial.md](docs/fsr-spatial.md).
+This checkout contains PC FSR1 plus post-decode SGSR1, FSR1, and NIS paths on
+Quest/Adreno. Game, transport, and target resolutions are independent. It is
+not temporal FSR and the server contains no frame-generation backend. Choose a
+mode in the headset Video menu, then reconnect. Pipeline details, fallback,
+logs, limitations, and the stability checklist are in
+[docs/fsr-spatial.md](docs/fsr-spatial.md).
 
 The same branch also contains the deterministic connection lifecycle described
 in [docs/connection-lifecycle.md](docs/connection-lifecycle.md). See the

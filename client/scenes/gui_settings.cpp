@@ -25,6 +25,7 @@
 #include "scenes/gui_common.h"
 
 #include "gui_settings.h"
+#include "spatial_upscaling.h"
 
 #include "application.h"
 #include "configuration.h"
@@ -267,7 +268,7 @@ void settings_video(const settings_context & ctx)
 		const auto height = ctx.recommended_height;
 		list.push_back({
 		        .id = "##resolution",
-		        .label = _("Render resolution"),
+		        .label = _("Game resolution"),
 		        .description = fmt::format(_cF("render resolution", "Pixels rendered per eye ({}x{}). Lower to gain performance."), int(width * config.resolution_scale), int(height * config.resolution_scale)),
 		        .ui = ui_kind::slider,
 		        .get_int = [&config] { return int(std::lround(config.resolution_scale * 100)); },
@@ -281,19 +282,70 @@ void settings_video(const settings_context & ctx)
 		});
 	}
 
-	list.push_back({
-	        .id = "##fsr_upscaling",
-	        .label = _("FSR 1 spatial upscaling"),
-	        .description = _("Reconstructs a sub-native render resolution before encoding. Requires reconnection and does not generate frames."),
-	        .ui = ui_kind::toggle,
-	        .get_bool = [&config] { return config.fsr_upscaling; },
-	        .set_bool = [&config](bool v) { config.fsr_upscaling = v; config.save(); },
-	        .default_bool = default_config.fsr_upscaling,
-	        .enabled = [&ctx, &config] { return not ctx.in_game && config.resolution_scale < 1.0f; },
-	        .disabled_tooltip = ctx.in_game
-	                                    ? disconnect_tip
-	                                    : _("Set render resolution below 100% to enable FSR 1."),
-	});
+	{
+		const int target_width = std::min<int>(ctx.maximum_width,
+		                                       std::lround(ctx.recommended_width * config.target_resolution_scale));
+		const int target_height = std::min<int>(ctx.maximum_height,
+		                                        std::lround(ctx.recommended_height * config.target_resolution_scale));
+		list.push_back({
+		        .id = "##target_resolution",
+		        .label = _("Target resolution"),
+		        .description = fmt::format(_cF("target resolution", "Requested final pixels per eye ({}x{}). Upscaling requires a spatial mode and is limited to 2x per axis."), target_width, target_height),
+		        .ui = ui_kind::slider,
+		        .get_int = [&config] { return int(std::lround(config.target_resolution_scale * 100)); },
+		        .set_int = [&config](int v) { config.target_resolution_scale = v / 100.0f; config.save(); },
+		        .v_min = 50,
+		        .v_max = config.extended_config ? 150 : 100,
+		        .fmt = "%d%%",
+		        .default_int = int(std::lround(default_config.target_resolution_scale * 100)),
+		        .enabled = [&ctx] { return not ctx.in_game; },
+		        .disabled_tooltip = disconnect_tip,
+		});
+	}
+
+	{
+		using mode = from_headset::spatial_upscaling_mode;
+		std::vector<mode> modes{mode::off, mode::fsr1_pc};
+		if (application::get_physical_device_properties().vendorID == 0x5143)
+		{
+			modes.push_back(mode::sgsr1_headset);
+			modes.push_back(mode::fsr1_headset);
+			modes.push_back(mode::nis_headset);
+		}
+		auto mode_label = [](mode value) -> std::string {
+			switch (value)
+			{
+				case mode::off:
+					return _C("spatial upscaling mode", "Off");
+				case mode::fsr1_pc:
+					return _C("spatial upscaling mode", "PC — FSR1");
+				case mode::sgsr1_headset:
+					return _C("spatial upscaling mode", "Headset — SGSR1 (recommended)");
+				case mode::fsr1_headset:
+					return _C("spatial upscaling mode", "Headset — FSR1");
+				case mode::nis_headset:
+					return _C("spatial upscaling mode", "Headset — NIS");
+			}
+			return {};
+		};
+		list.push_back({
+		        .id = "##spatial_upscaling",
+		        .label = _("Spatial upscaling"),
+		        .description = _("Reconstructs the game image to the target resolution. Headset modes run after decoding and before the WiVRn interface is composed."),
+		        .ui = ui_kind::combo,
+		        .get_int = [&config, modes] { return index(modes, config.spatial_upscaling).value_or(0); },
+		        .set_int = [&config, modes](int v) { config.spatial_upscaling = modes.at(v); config.save(); },
+		        .options = [modes, mode_label] {
+			        std::vector<std::string> result;
+			        for (auto value: modes)
+				        result.push_back(mode_label(value));
+			        return result; },
+		        .title = _("Spatial upscaling"),
+		        .default_int = index(modes, default_config.spatial_upscaling).value_or(0),
+		        .enabled = [&ctx] { return not ctx.in_game; },
+		        .disabled_tooltip = disconnect_tip,
+		});
+	}
 
 	if (ctx.instance.has_extension(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME))
 	{
@@ -402,9 +454,44 @@ void settings_streaming(const settings_context & ctx)
 
 	const int mb = 1'000'000;
 	list.push_back({
+	        .id = "##bitrate_mode",
+	        .label = _("Bitrate mode"),
+	        .description = _("Automatic scales the budget with the real encoded pixel area. Manual always uses the selected budget."),
+	        .ui = ui_kind::segmented,
+	        .get_int = [&config] { return config.bitrate == from_headset::bitrate_mode::automatic ? 0 : 1; },
+	        .set_int = [&ctx, &config](int v) {
+		        config.bitrate = v == 0 ? from_headset::bitrate_mode::automatic : from_headset::bitrate_mode::manual;
+		        config.save();
+		        if (ctx.on_streaming_changed)
+			        ctx.on_streaming_changed(); },
+	        .options = [] { return std::vector<std::string>{_("Automatic"), _("Manual")}; },
+	        .default_int = default_config.bitrate == from_headset::bitrate_mode::automatic ? 0 : 1,
+	});
+
+	auto effective_bitrate = [&] {
+		from_headset::headset_info_packet info{};
+		info.native_eye_width = std::min<uint32_t>(ctx.recommended_width, UINT16_MAX);
+		info.native_eye_height = std::min<uint32_t>(ctx.recommended_height, UINT16_MAX);
+		info.render_eye_width = std::min<uint32_t>(ctx.maximum_width, std::lround(ctx.recommended_width * config.resolution_scale));
+		info.render_eye_height = std::min<uint32_t>(ctx.maximum_height, std::lround(ctx.recommended_height * config.resolution_scale));
+		info.target_eye_width = std::min<uint32_t>(ctx.maximum_width, std::lround(ctx.recommended_width * config.target_resolution_scale));
+		info.target_eye_height = std::min<uint32_t>(ctx.maximum_height, std::lround(ctx.recommended_height * config.target_resolution_scale));
+		info.stream_eye_width = std::lround(info.render_eye_width * config.get_stream_scale());
+		info.stream_eye_height = std::lround(info.render_eye_height * config.get_stream_scale());
+		info.spatial_upscaling = config.spatial_upscaling;
+		const auto encoded = align_video_extent(transport_extent(info));
+		const auto reference = align_video_extent({
+		        uint32_t(std::lround(info.native_eye_width * config.get_default_stream_scale())),
+		        uint32_t(std::lround(info.native_eye_height * config.get_default_stream_scale())),
+		});
+		return config.bitrate == from_headset::bitrate_mode::automatic
+		               ? automatic_bitrate(config.bitrate_bps, encoded, reference)
+		               : config.bitrate_bps;
+	}();
+	list.push_back({
 	        .id = "##bitrate",
-	        .label = _("Bitrate"),
-	        .description = _("Video data rate sent to the headset."),
+	        .label = _("Bitrate budget"),
+	        .description = fmt::format(_F("Maximum video data rate. Effective bitrate: {} Mbit/s."), effective_bitrate / mb),
 	        .ui = ui_kind::slider,
 	        .get_int = [&config] { return int(config.bitrate_bps / mb); },
 	        .set_int = [&ctx, &config](int v) { config.bitrate_bps = uint32_t(v) * mb; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },

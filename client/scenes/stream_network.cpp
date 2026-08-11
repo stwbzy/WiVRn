@@ -409,11 +409,25 @@ void scenes::stream::send_feedback(const wivrn::from_headset::feedback & feedbac
 void scenes::stream::operator()(to_headset::application_list && l)
 {
 	apps(std::move(l));
+
+	// A fresh server connection has no video frames until an OpenXR application
+	// starts. The application launcher is rendered locally in the parent lobby,
+	// so make it available as soon as its data arrives instead of waiting for a
+	// frame that cannot exist yet. push_blit_handle() moves stalled -> streaming
+	// when the selected application submits its first stereo frame.
+	state expected = state::initializing;
+	if (state_.compare_exchange_strong(expected, state::stalled))
+		spdlog::info("Application launcher ready before first video frame");
 }
 
 void scenes::stream::operator()(to_headset::application_icon && icon)
 {
 	apps(std::move(icon));
+}
+
+void scenes::stream::operator()(to_headset::application_launch_result && result)
+{
+	apps(std::move(result));
 }
 
 void scenes::stream::operator()(to_headset::running_applications && apps)
@@ -425,5 +439,14 @@ void scenes::stream::start_application(std::string appid)
 {
 	network_session->send_control(wivrn::from_headset::start_app{
 	        .app_id = std::move(appid),
+	});
+}
+
+void scenes::stream::request_application_list()
+{
+	network_session->send_control(from_headset::get_application_list{
+	        .language = application::get_messages_info().language,
+	        .country = application::get_messages_info().country,
+	        .variant = application::get_messages_info().variant,
 	});
 }

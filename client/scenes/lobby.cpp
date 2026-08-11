@@ -390,15 +390,58 @@ void scenes::lobby::update_server_list()
 		else
 		{
 			server->second.visible = true;
-			server->second.service = service;
+			// A successful connection may have promoted this entry to a manual
+			// numeric fallback. Preserve that address so discovery loss cannot
+			// make the known server unreachable again.
+			if (!server->second.manual)
+				server->second.service = service;
 			server->second.compatible = compatible;
 		}
 	}
 }
 
+void scenes::lobby::remember_successful_server(const wivrn_discover::service & service, const wivrn_session & session)
+{
+	const std::string address = std::visit([](const auto & value) { return ip_address_to_string(value); }, session.address);
+	auto cookie = service.txt.find("cookie");
+	const std::string key = cookie != service.txt.end() && !cookie->second.empty()
+	                                ? cookie->second
+	                                : fmt::format("recent-{}:{}", address, service.port);
+
+	auto & config = application::get_config();
+	auto previous = config.servers.find(key);
+	// A deep-link fallback is created specifically because discovery is not
+	// reliable, so reconnect it automatically on the next normal launch.
+	// For discovered or user-managed entries, preserve the user's choice.
+	const bool autoconnect = cookie == service.txt.end()
+	                                 ? true
+	                                 : previous != config.servers.end() && previous->second.autoconnect;
+	std::string name = service.name.empty() ? service.hostname : service.name;
+	if (name.empty())
+		name = address;
+
+	auto remembered = service;
+	remembered.name = std::move(name);
+	remembered.hostname = address;
+	remembered.addresses.clear();
+	remembered.txt["cookie"] = key;
+	config.servers.insert_or_assign(
+	        key,
+	        configuration::server_data{
+	                .autoconnect = autoconnect,
+	                .manual = true,
+	                .visible = true,
+	                .compatible = true,
+	                .service = std::move(remembered),
+	        });
+	config.save();
+	spdlog::info("Remembered successful server {} at {}:{}", key, address, service.port);
+}
+
 void scenes::lobby::connect(const configuration::server_data & data)
 {
 	server_name = data.service.name;
+	connecting_service = data.service;
 	async_error.reset();
 
 	async_session = utils::async<std::unique_ptr<wivrn_session>, std::string>(
@@ -850,13 +893,19 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 		{
 			auto session = async_session.get();
 			if (session)
+			{
+				if (connecting_service)
+					remember_successful_server(*connecting_service, *session);
 				next_scene = stream::create(std::move(session), 1'000'000'000.f / frame_state.predictedDisplayPeriod, server_name, *this);
+			}
 
+			connecting_service.reset();
 			async_session.reset();
 		}
 		catch (std::exception & e)
 		{
 			spdlog::error("Error connecting to server: {}", e.what());
+			connecting_service.reset();
 			async_session.cancel();
 			async_error = e.what();
 		}
@@ -874,6 +923,10 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 
 			case scenes::stream::state::shutdown:
 				current_tab = tab::server_list;
+				break;
+
+			case scenes::stream::state::stalled:
+				current_tab = tab::connected;
 				break;
 
 			case scenes::stream::state::reconnecting:
@@ -904,7 +957,7 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 			const auto & servers = application::get_config().servers;
 			for (auto && [cookie, data]: servers)
 			{
-				if (data.visible && (data.autoconnect || force_autoconnect) && data.compatible && autoconnect_enabled)
+				if ((data.visible || data.manual) && (data.autoconnect || force_autoconnect) && data.compatible && autoconnect_enabled)
 				{
 					autoconnect_enabled = false;
 					connect(data);

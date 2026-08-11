@@ -26,6 +26,7 @@
 #include "scene.h"
 #include "scenes/input_profile.h"
 #include "stream_defoveator.h"
+#include "stream_upscaler.h"
 #include "utils/thread_safe.h"
 #include "wifi_lock.h"
 #include "wivrn_client.h"
@@ -95,7 +96,12 @@ private:
 	std::optional<to_headset::video_stream_description> video_stream_description;
 	std::array<accumulator_images, decoder_count> decoders; // Locked by decoder_mutex
 
+	xr::swapchain swapchain;
+	std::optional<stream_upscaler> spatial_upscaler;
+	// Destroy the defoveator's views/framebuffers before the upscaler image they reference.
 	std::optional<stream_defoveator> defoveator;
+	bool direct_scaled_output = false;
+	bool headset_upscale_path = false;
 
 	vk::raii::Fence fence = nullptr;
 	vk::raii::CommandBuffer command_buffer = nullptr;
@@ -125,10 +131,9 @@ private:
 	{
 		state previous = state_.load();
 		while (previous != state::shutdown && !state_.compare_exchange_weak(previous, new_state))
-		{}
+		{
+		}
 	}
-
-	xr::swapchain swapchain;
 
 	std::optional<audio> audio_handle;
 
@@ -268,6 +273,7 @@ public:
 	void operator()(to_headset::stream_tab_change &&);
 	void operator()(to_headset::application_list &&);
 	void operator()(to_headset::application_icon &&);
+	void operator()(to_headset::application_launch_result &&);
 	void operator()(to_headset::running_applications &&);
 	void operator()(audio_data &&);
 
@@ -290,8 +296,12 @@ public:
 	void exit();
 	void request_disconnect(disconnect_mode mode = disconnect_mode::default_mode);
 	uint32_t reconnect_remaining_seconds() const;
-	connection_close_reason reconnect_close_reason() const { return reconnect_reason.load(); }
+	connection_close_reason reconnect_close_reason() const
+	{
+		return reconnect_reason.load();
+	}
 	void start_application(std::string appid);
+	void request_application_list();
 
 	static meta & get_meta_scene();
 	std::optional<std::string> pop_stream_error();
@@ -307,7 +317,7 @@ private:
 	void send_derived_pose();
 
 	void setup(const to_headset::video_stream_description &);
-	void setup_reprojection_swapchain(uint32_t width, uint32_t height);
+	void setup_reprojection_swapchain(uint32_t width, uint32_t height, uint32_t input_width, uint32_t input_height);
 
 	vk::raii::QueryPool query_pool = nullptr;
 	bool query_pool_filled = false;
@@ -320,12 +330,14 @@ private:
 
 	struct gpu_timestamps
 	{
-		float gpu_time = 0;
+		float defoveate_time = 0;
+		float upscale_time = 0;
 	};
 
 	struct global_metric
 	{
-		float gpu_time;
+		float defoveate_time = 0;
+		float upscale_time = 0;
 		float cpu_time = 0;
 		float bandwidth_rx = 0;
 		float bandwidth_tx = 0;
