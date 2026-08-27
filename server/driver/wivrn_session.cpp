@@ -40,6 +40,7 @@
 #include "wivrn_generic_tracker.h"
 #include "wivrn_htc_face_tracker.h"
 #include "wivrn_ipc.h"
+#include "frame_synthesis_negotiation.h"
 #include "wivrn_packets.h"
 #include "xr/to_string.h"
 
@@ -54,10 +55,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cinttypes>
+#include <cstdlib>
 #include <magic_enum.hpp>
 #include <multi/comp_multi_interface.h>
 #include <stdexcept>
 #include <string.h>
+#include <string_view>
 #include <utility>
 #include <vulkan/vulkan.h>
 
@@ -88,8 +91,21 @@ create_audio_device(const from_headset::headset_info_packet & info, wivrn_sessio
 	        "WiVRn(microphone)",
 	        "wivrn.sink",
 	        "WiVRn",
-	        info,
-	        session);
+		info,
+		session);
+}
+
+static bool frame_synthesis_forced_off()
+{
+	const char * value = std::getenv("WIVRN_DISABLE_FRAME_SYNTHESIS");
+	return value != nullptr && *value != '\0' && std::string_view(value) != "0";
+}
+
+static uint8_t server_frame_synthesis_capabilities()
+{
+	return frame_synthesis_forced_off()
+	               ? 0
+	               : static_cast<uint8_t>(frame_synthesis_capability::server_experimental);
 }
 
 wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection, b_system & system) :
@@ -99,11 +115,18 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
                 .feature_inc = method_pointer<&wivrn_session::feature_inc>,
                 .feature_dec = method_pointer<&wivrn_session::feature_dec>,
                 .destroy = method_pointer<&wivrn_session::destroy>,
-        },
-        connection(std::move(connection)),
-        headset_info(this->connection->info()),
-        settings(get_info().settings),
-        compositor(*this),
+	        },
+	        connection(std::move(connection)),
+	        headset_info(this->connection->info()),
+	        settings(get_info().settings),
+		requested_frame_synthesis_backend(frame_synthesis_negotiation::normalize_backend(get_info().settings.frame_synthesis_backend)),
+		effective_frame_synthesis_backend(frame_synthesis_negotiation::effective_backend(
+		        get_info().settings.frame_synthesis,
+		        get_info().settings.frame_synthesis_backend,
+		        get_info().frame_synthesis_capabilities,
+		        server_frame_synthesis_capabilities())),
+		headset_frame_synthesis_capabilities(get_info().frame_synthesis_capabilities),
+	        compositor(*this),
         xrt_system(system),
         control(*this->connection),
         hmd(this, get_info()),
@@ -112,6 +135,28 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
         left_hand_interaction(XRT_DEVICE_EXT_HAND_INTERACTION, 0, &hmd, this),
         right_hand_interaction(XRT_DEVICE_EXT_HAND_INTERACTION, 1, &hmd, this)
 {
+	// Normalize the initial request before exposing it through get_settings().
+	// This keeps an unknown enum value from reaching either the compositor or
+	// the Monado IPC bridge.
+	auto initial_settings = get_info().settings;
+	initial_settings.frame_synthesis_backend = frame_synthesis_negotiation::normalize_backend(initial_settings.frame_synthesis_backend);
+	headset_info.settings = initial_settings;
+	*settings.lock() = initial_settings;
+	requested_frame_synthesis_backend.store(initial_settings.frame_synthesis_backend);
+	// The initializer negotiated the raw wire value before normalization.  Do
+	// not renegotiate the normalized unknown value here, or a future enum could
+	// accidentally become an enabled Auto backend.
+
+	// Apply the negotiated backend before its mode.  For headset_color the
+	// compositor/pacer then owns the 2:1 application cadence without creating a
+	// second encoded frame; server_experimental is the only path that generates
+	// and transports a synthetic image.
+	const auto initial_backend = effective_frame_synthesis_backend.load();
+	compositor.set_frame_synthesis_backend(initial_backend);
+	compositor.set_frame_synthesis_mode(initial_backend == frame_synthesis_backend::auto_select
+	                                            ? frame_synthesis_mode::off
+	                                            : initial_settings.frame_synthesis);
+
 	try
 	{
 		audio_handle = create_audio_device(get_info(), *this);
@@ -412,6 +457,10 @@ void wivrn_session::pause_session()
 
 	worker_thread = std::jthread();
 	offset_est.reset();
+	if (body_tracker)
+		body_tracker->reset_tracking();
+	for (auto & tracker: generic_trackers)
+		tracker.reset_tracking();
 
 	if (audio_handle)
 	{
@@ -531,6 +580,57 @@ bool wivrn_session::accept_packet_generation(uint64_t generation)
 	return false;
 }
 
+void wivrn_session::reset_body_tracking_state(uint64_t epoch)
+{
+	current_body_epoch = epoch;
+	if (body_tracker)
+		body_tracker->reset_tracking();
+	for (auto & tracker: generic_trackers)
+		tracker.reset_tracking();
+}
+
+void wivrn_session::report_body_tracking_status(bool force)
+{
+	if (!body_tracker || !connection->is_active())
+		return;
+	const auto now = std::chrono::steady_clock::now();
+	if (!force && now - last_body_status_report < std::chrono::seconds(1))
+		return;
+	last_body_status_report = now;
+	send_control(body_tracker->status(current_body_epoch, connection->get_generation()));
+}
+
+bool wivrn_session::accept_body_epoch(uint64_t epoch)
+{
+	const uint64_t generation = connection->get_generation();
+	if (body_epoch_generation != generation)
+	{
+		body_epoch_generation = generation;
+		last_body_reset_request_id = UINT64_MAX;
+		last_body_reset_ack.reset();
+		reset_body_tracking_state(epoch);
+		return true;
+	}
+
+	if (epoch < current_body_epoch)
+	{
+		U_LOG_W("Discarding stale body packet epoch=%" PRIu64 " current=%" PRIu64,
+		        epoch,
+		        current_body_epoch);
+		connection->discard_packet();
+		return false;
+	}
+
+	if (epoch > current_body_epoch)
+	{
+		U_LOG_I("Body tracking epoch changed from %" PRIu64 " to %" PRIu64,
+		        current_body_epoch,
+		        epoch);
+		reset_body_tracking_state(epoch);
+	}
+	return true;
+}
+
 void wivrn_session::report_counters()
 {
 	const auto discarded = connection->get_discarded_packets();
@@ -557,8 +657,24 @@ float wivrn_session::default_fps()
 {
 	auto s = settings.lock();
 	if (s->preferred_refresh_rate)
-		return s->preferred_refresh_rate / s->fps_divider;
+		return s->preferred_refresh_rate;
 	return headset_info.available_refresh_rates.back();
+}
+
+uint8_t wivrn_session::get_server_frame_synthesis_capabilities() const
+{
+	// Keep the negotiated mask honest when the runtime kill switch is active.
+	// The compositor has the same switch, so an explicit server request then
+	// resolves to unsupported/off instead of reporting a backend that cannot run.
+	return server_frame_synthesis_capabilities();
+}
+
+frame_synthesis_backend wivrn_session::negotiate_frame_synthesis_backend(frame_synthesis_backend requested) const
+{
+	return frame_synthesis_negotiation::negotiate_backend(
+	        requested,
+	        headset_frame_synthesis_capabilities.load(),
+	        get_server_frame_synthesis_capabilities());
 }
 
 void wivrn_session::add_tracking_request(device_id device, int64_t at_ns, int64_t produced_ns, int64_t now)
@@ -620,21 +736,73 @@ void wivrn_session::operator()(from_headset::stream_ready && ready)
 
 void wivrn_session::operator()(const from_headset::settings_changed & settings)
 {
-	*this->settings.lock() = settings;
+	const auto requested_backend = settings.frame_synthesis_backend;
+	auto normalized = settings;
+	normalized.frame_synthesis_backend = frame_synthesis_negotiation::normalize_backend(requested_backend);
+	if (magic_enum::enum_name(normalized.body_tracking.profile).empty())
+		normalized.body_tracking.profile = body_tracking_profile::balanced;
+	if (magic_enum::enum_name(normalized.body_tracking.fidelity).empty())
+		normalized.body_tracking.fidelity = body_tracking_fidelity::automatic;
+	if (magic_enum::enum_name(normalized.body_tracking.calibration_mode).empty())
+		normalized.body_tracking.calibration_mode = body_tracking_calibration_mode::automatic;
+	if (magic_enum::enum_name(normalized.body_tracking.supervisor).empty())
+		normalized.body_tracking.supervisor = body_tracking_supervisor::off;
+	if (magic_enum::enum_name(normalized.body_tracking.supervisor_path).empty())
+		normalized.body_tracking.supervisor_path = body_tracking_supervisor_path::filtered;
+	normalized.body_tracking.smoothing_position_permille =
+	        std::min<uint16_t>(normalized.body_tracking.smoothing_position_permille, 1000);
+	normalized.body_tracking.smoothing_rotation_permille =
+	        std::min<uint16_t>(normalized.body_tracking.smoothing_rotation_permille, 1000);
+	normalized.body_tracking.confidence_threshold_permille =
+	        std::min<uint16_t>(normalized.body_tracking.confidence_threshold_permille, 1000);
+	normalized.body_tracking.dropout_hold_ms =
+	        std::min<uint16_t>(normalized.body_tracking.dropout_hold_ms, 2000);
+	normalized.body_tracking.recovery_samples =
+	        std::clamp<uint16_t>(normalized.body_tracking.recovery_samples, 1, 32);
+	normalized.body_tracking.prediction_ms = std::min<uint16_t>(normalized.body_tracking.prediction_ms, 100);
+	if (normalized.body_tracking.body_height_mm)
+		*normalized.body_tracking.body_height_mm =
+		        std::clamp<uint16_t>(*normalized.body_tracking.body_height_mm, 1000, 2500);
+	*this->settings.lock() = normalized;
+	requested_frame_synthesis_backend.store(normalized.frame_synthesis_backend);
 
-	if (settings.bitrate_bps != 0)
-		compositor.set_bitrate(settings.bitrate_bps);
+	const auto effective = frame_synthesis_negotiation::effective_backend(
+	        settings.frame_synthesis,
+	        requested_backend,
+	        headset_frame_synthesis_capabilities.load(),
+	        get_server_frame_synthesis_capabilities());
+	effective_frame_synthesis_backend.store(effective);
 
-	if (settings.preferred_refresh_rate != 0)
-		compositor.set_framerate(settings.preferred_refresh_rate / settings.fps_divider);
+	if (normalized.frame_synthesis_backend != effective && normalized.frame_synthesis != frame_synthesis_mode::off)
+	{
+		U_LOG_W("Frame synthesis backend %s unavailable; negotiated %s",
+		        std::string(magic_enum::enum_name(normalized.frame_synthesis_backend)).c_str(),
+		        std::string(magic_enum::enum_name(effective)).c_str());
+	}
 
-	if (not settings.mirror_gamepad and uinput_handler)
+	if (normalized.bitrate_bps != 0)
+		compositor.set_bitrate(normalized.bitrate_bps);
+
+	if (normalized.preferred_refresh_rate != 0)
+		compositor.set_framerate(normalized.preferred_refresh_rate);
+	// Backend selection must precede mode selection.  The compositor uses
+	// headset_color for a client-side 2:1 cadence (no synthetic encode) and
+	// server_experimental for generated transport frames.
+	compositor.set_frame_synthesis_backend(effective);
+	compositor.set_frame_synthesis_mode(effective == frame_synthesis_backend::auto_select
+	                                            ? frame_synthesis_mode::off
+	                                            : normalized.frame_synthesis);
+
+	if (not normalized.mirror_gamepad and uinput_handler)
 		uinput_handler->destroy_gamepad();
 
 	if (body_tracker)
-		(*body_tracker)(settings);
+	{
+		(*body_tracker)(normalized);
+		report_body_tracking_status(true);
+	}
 
-	wivrn_ipc_socket_monado->send(std::move(settings));
+	wivrn_ipc_socket_monado->send(std::move(normalized));
 }
 
 static xrt_device_name get_name(interaction_profile profile)
@@ -822,13 +990,20 @@ void wivrn_session::operator()(from_headset::meta_body && body_tracking)
 {
 	if (!accept_packet_generation(body_tracking.connection_generation))
 		return;
+	if (!accept_body_epoch(body_tracking.body_epoch))
+		return;
 	assert(body_tracker);
 
 	auto offset = offset_est.get_offset();
 	body_tracker->update_tracking(body_tracking, offset);
+	report_body_tracking_status();
 }
 void wivrn_session::operator()(from_headset::meta_body_skeleton && body_skeleton)
 {
+	if (!accept_packet_generation(body_skeleton.connection_generation))
+		return;
+	if (!accept_body_epoch(body_skeleton.body_epoch))
+		return;
 	assert(body_tracker);
 
 	body_tracker->update_skeleton(body_skeleton);
@@ -837,10 +1012,72 @@ void wivrn_session::operator()(from_headset::bd_body && body_tracking)
 {
 	if (!accept_packet_generation(body_tracking.connection_generation))
 		return;
+	if (!accept_body_epoch(body_tracking.body_epoch))
+		return;
 	assert(body_tracker);
 
 	auto offset = offset_est.get_offset();
 	body_tracker->update_tracking(body_tracking, offset);
+	report_body_tracking_status();
+}
+
+void wivrn_session::operator()(from_headset::body_tracking_reset_request && request)
+{
+	if (!accept_packet_generation(request.connection_generation))
+		return;
+	const bool fresh_generation = body_epoch_generation != connection->get_generation();
+	if (fresh_generation)
+	{
+		// Request IDs restart on a fresh client process. Never replay an ACK
+		// cached for a previous transport generation.
+		body_epoch_generation = connection->get_generation();
+		last_body_reset_request_id = UINT64_MAX;
+		last_body_reset_ack.reset();
+	}
+
+	// A repeated request can be produced when the ACK was lost. Re-send the
+	// previous result without applying the reset twice.
+	if (last_body_reset_ack && request.request_id == last_body_reset_request_id)
+	{
+		send_control(to_headset::body_tracking_reset_ack(*last_body_reset_ack));
+		return;
+	}
+
+	const bool supported = request.reset != body_tracking_reset::none &&
+	                       (body_tracker.has_value() || !generic_trackers.empty());
+	const bool current_or_new_epoch = fresh_generation || request.body_epoch >= current_body_epoch;
+	const bool accepted = supported && current_or_new_epoch;
+	if (accepted)
+	{
+		body_epoch_generation = connection->get_generation();
+		// UDP body data can overtake this control request. A newer packet has
+		// already adopted and cleared the same epoch, so do not erase that first
+		// recovered sample a second time.
+		if (fresh_generation || request.body_epoch != current_body_epoch)
+			reset_body_tracking_state(request.body_epoch);
+		U_LOG_I("Applied body tracking reset request=%" PRIu64 " scope=%s epoch=%" PRIu64,
+		        request.request_id,
+		        std::string(magic_enum::enum_name(request.reset)).c_str(),
+		        request.body_epoch);
+	}
+	else
+	{
+		U_LOG_W("Rejected body tracking reset request=%" PRIu64 " scope=%s epoch=%" PRIu64,
+		        request.request_id,
+		        std::string(magic_enum::enum_name(request.reset)).c_str(),
+		        request.body_epoch);
+	}
+
+	last_body_reset_request_id = request.request_id;
+	last_body_reset_ack = to_headset::body_tracking_reset_ack{
+	        .request_id = request.request_id,
+	        .reset = request.reset,
+	        .accepted = accepted,
+	        .body_epoch = current_body_epoch,
+	        .connection_generation = connection->get_generation(),
+	};
+	send_control(to_headset::body_tracking_reset_ack(*last_body_reset_ack));
+	report_body_tracking_status(true);
 }
 void wivrn_session::operator()(from_headset::htc_body && body_tracking)
 {
@@ -925,8 +1162,31 @@ void wivrn_session::operator()(from_headset::timesync_response && timesync)
 
 void wivrn_session::operator()(from_headset::feedback && feedback)
 {
-	if (!accept_packet_generation(feedback.connection_generation))
-		return;
+	// Feedback arrives on the authenticated control transport.  A transport is
+	// replaced (and re-keyed) on every reconnect, so a packet successfully
+	// decoded here cannot be a late datagram from the previous generation.
+	// Older clients left this field at zero, which otherwise rejects both eye
+	// feedback packets every display interval and leaves the pacer permanently
+	// blind.  Keep strict generation checks for tracking, input and stream UDP;
+	// tolerate the legacy value only for this generation-scoped channel.
+	const auto expected_generation = connection->get_generation();
+	if (feedback.connection_generation != expected_generation)
+	{
+		if (feedback_generation != expected_generation)
+		{
+			feedback_generation = expected_generation;
+			mismatched_feedback_packets = 0;
+		}
+		++mismatched_feedback_packets;
+		if (mismatched_feedback_packets == 1 || mismatched_feedback_packets % 720 == 0)
+			U_LOG_W("Accepting legacy feedback generation %" PRIu64
+			        " on authenticated connection generation %" PRIu64
+			        " (mismatched packets=%" PRIu64 ")",
+			        feedback.connection_generation,
+			        expected_generation,
+			        mismatched_feedback_packets);
+		feedback.connection_generation = expected_generation;
+	}
 	clock_offset o = offset_est.get_offset();
 	if (not o)
 		return;
@@ -1002,7 +1262,7 @@ void wivrn_session::operator()(from_headset::user_presence_changed && event)
 void wivrn_session::operator()(from_headset::refresh_rate_changed && event)
 {
 	auto locked = settings.lock();
-	compositor.set_framerate(event.to / locked->fps_divider);
+	compositor.set_framerate(event.to);
 	push_event(
 	        {
 	                .display = {
@@ -1572,7 +1832,11 @@ bool wivrn_session::reconnect(std::stop_token stop, std::optional<std::chrono::s
 
 			// update headset info
 
-			headset_info.settings = info.settings;
+			headset_frame_synthesis_capabilities.store(info.frame_synthesis_capabilities);
+			headset_info.frame_synthesis_capabilities = info.frame_synthesis_capabilities;
+			auto resumed_settings = info.settings;
+			resumed_settings.frame_synthesis_backend = frame_synthesis_negotiation::normalize_backend(resumed_settings.frame_synthesis_backend);
+			headset_info.settings = resumed_settings;
 			(*this)(headset_info.settings);
 
 			headset_info.language = info.language;

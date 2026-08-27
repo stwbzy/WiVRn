@@ -40,6 +40,7 @@
 #include "wivrn_uinput.h"
 #include "xrt/xrt_results.h"
 #include "xrt/xrt_system.h"
+#include <atomic>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -69,6 +70,12 @@ class wivrn_session : public xrt_system_devices
 	from_headset::headset_info_packet headset_info;
 	// run-time editable settings
 	thread_safe<from_headset::settings_changed> settings;
+	// These precede the compositor so its constructor can inspect the initial
+	// negotiated backend.  Runtime updates remain atomic across network and
+	// compositor threads.
+	std::atomic<frame_synthesis_backend> requested_frame_synthesis_backend{frame_synthesis_backend::auto_select};
+	std::atomic<frame_synthesis_backend> effective_frame_synthesis_backend{frame_synthesis_backend::auto_select};
+	std::atomic<uint8_t> headset_frame_synthesis_capabilities{0};
 
 	wivrn::compositor compositor;
 	pacing_app_factory app_pacers;
@@ -130,6 +137,15 @@ class wivrn_session : public xrt_system_devices
 	std::chrono::steady_clock::time_point last_stream_heartbeat{};
 	uint64_t heartbeat_sequence = 0; // network thread only
 	uint64_t reported_discarded_packets = 0;
+	uint64_t feedback_generation = UINT64_MAX;
+	uint64_t mismatched_feedback_packets = 0;
+	// Body samples have their own epoch because a calibration/reset changes the
+	// coordinate system without necessarily reconnecting the transport.
+	uint64_t body_epoch_generation = UINT64_MAX; // network thread only
+	uint64_t current_body_epoch = 0;             // network thread only
+	uint64_t last_body_reset_request_id = UINT64_MAX;
+	std::optional<to_headset::body_tracking_reset_ack> last_body_reset_ack;
+	std::chrono::steady_clock::time_point last_body_status_report{};
 
 	wivrn_session(std::unique_ptr<wivrn_connection> connection, b_system &);
 
@@ -162,6 +178,27 @@ public:
 
 	float default_fps();
 
+	// Backend negotiation is kept in the session so the compositor and the
+	// client UI can report the same requested/effective state without guessing
+	// from frame_synthesis_mode alone.
+	frame_synthesis_backend get_requested_frame_synthesis_backend() const
+	{
+		return requested_frame_synthesis_backend.load();
+	}
+	frame_synthesis_backend get_frame_synthesis_backend() const
+	{
+		return effective_frame_synthesis_backend.load();
+	}
+	uint8_t get_headset_frame_synthesis_capabilities() const
+	{
+		return headset_frame_synthesis_capabilities.load();
+	}
+	uint8_t get_server_frame_synthesis_capabilities() const;
+	int64_t application_frame_time()
+	{
+		return app_pacers.get_frame_time();
+	}
+
 	locked<from_headset::settings_changed> get_settings()
 	{
 		return settings.lock();
@@ -192,6 +229,7 @@ public:
 	void operator()(from_headset::meta_body_skeleton &&);
 	void operator()(from_headset::bd_body &&);
 	void operator()(from_headset::htc_body &&);
+	void operator()(from_headset::body_tracking_reset_request &&);
 	void operator()(from_headset::inputs &&);
 	void operator()(from_headset::hid::input && e);
 	void operator()(from_headset::timesync_response &&);
@@ -246,10 +284,15 @@ private:
 	void resume_session();
 	void transition(server_connection_state, connection_close_reason = connection_close_reason::none);
 	bool accept_packet_generation(uint64_t);
+	bool accept_body_epoch(uint64_t epoch);
+	void reset_body_tracking_state(uint64_t epoch);
+	void report_body_tracking_status(bool force = false);
 	void report_counters();
 
 	void update_client_states(bool visible, bool focused);
 	void poll_session_loss();
+
+	frame_synthesis_backend negotiate_frame_synthesis_backend(frame_synthesis_backend requested) const;
 
 	// checks if a headset is usable with this session
 	std::pair<bool, std::optional<std::string>> validate_headset_info(const from_headset::headset_info_packet & info);

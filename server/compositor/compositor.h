@@ -100,6 +100,7 @@ private:
 	wivrn::pacer pacer;
 
 	layer_squasher squasher;
+	upscaling_selection scaling_selection;
 	std::optional<wivrn::fsr_upscaler> spatial_upscaler;
 	wivrn::foveation foveation;
 
@@ -146,6 +147,8 @@ private:
 
 	struct frame_generation_flow
 	{
+		image_allocation coarse_motion;
+		std::array<vk::raii::ImageView, 2> coarse_motion_views;
 		image_allocation motion;
 		std::array<vk::raii::ImageView, 2> motion_views;
 		vk::raii::Sampler sampler;
@@ -153,7 +156,7 @@ private:
 		vk::raii::PipelineLayout layout;
 		vk::raii::Pipeline pipeline;
 		vk::raii::DescriptorPool descriptor_pool;
-		std::array<vk::DescriptorSet, 2> descriptor_sets{};
+		std::array<vk::DescriptorSet, 4> descriptor_sets{};
 		bool output_valid = false;
 
 		frame_generation_flow(vk_bundle &, vk::Extent3D);
@@ -181,12 +184,46 @@ private:
 		uint64_t backend_dispatches = 0;
 		uint64_t handoff_frames = 0;
 		uint64_t double_rate_pairs = 0;
+		frame_synthesis_mode mode = frame_synthesis_mode::off;
+		frame_synthesis_backend backend = frame_synthesis_backend::auto_select;
+		// Half-rate application pacing is shared by both implementations.  Only
+		// the server backend also creates and transports an interval frame.
+		bool half_rate_enabled = false;
+		bool session_disabled = false;
+		runtime_fallback_reason fallback_reason = runtime_fallback_reason::none;
+		uint32_t auto_over_budget_windows = 0;
+		uint32_t auto_headroom_windows = 0;
+		uint32_t flow_deadline_windows = 0;
+		uint32_t flow_samples = 0;
+		uint32_t flow_over_budget = 0;
+		uint32_t network_deadline_windows = 0;
+		uint32_t feedback_samples = 0;
+		uint32_t missed_feedback = 0;
+		uint64_t last_feedback_frame_index = UINT64_MAX;
+		uint64_t real_frames = 0;
+		uint64_t synthetic_frames = 0;
+		float optical_flow_ms = 0;
+		float missed_interval_percent = 0;
 	} frame_generation_probe;
 
 	int64_t previous_display_time_ns = 0;
 	std::array<XrPosef, 2> previous_view_poses{};
 	std::array<XrFovf, 2> previous_view_fovs{};
 	bool previous_view_poses_valid = false;
+
+	// Transport frame IDs must never go backwards when ASW is enabled or
+	// disabled at runtime. Keep the application-frame association separately
+	// so pacer feedback can still be correlated after assigning a monotonic
+	// transport sequence to both real and synthetic frames.
+	struct stream_frame_mapping
+	{
+		uint64_t stream_frame_index = UINT64_MAX;
+		int64_t application_frame_id = -1;
+		bool application_frame = false;
+	};
+	static constexpr size_t stream_frame_mapping_count = 1024;
+	std::array<stream_frame_mapping, stream_frame_mapping_count> stream_frame_mappings{};
+	uint64_t next_stream_frame_index = 0;
 
 	xrt_result_t begin_session(const xrt_begin_session_info * info)
 	{
@@ -229,6 +266,12 @@ private:
 	                                         const std::array<XrPosef, 2> &,
 	                                         const std::array<XrFovf, 2> &);
 	void capture_frame_generation_history(vk::raii::CommandBuffer &);
+	bool initialize_frame_synthesis_backend();
+	void reset_frame_synthesis_temporal_state();
+	void set_frame_synthesis_active(bool active);
+	void disable_frame_synthesis_for_session(runtime_fallback_reason reason);
+	void update_frame_synthesis_policy(float optical_flow_ms);
+	void send_runtime_telemetry();
 
 	xrt_result_t get_display_refresh_rate(float * out_display_refresh_rate_hz);
 
@@ -273,6 +316,8 @@ public:
 		return frame_rate;
 	}
 	void set_framerate(float hz);
+	void set_frame_synthesis_mode(frame_synthesis_mode mode);
+	void set_frame_synthesis_backend(frame_synthesis_backend backend);
 
 	void set_bitrate(uint32_t);
 	void update_tracking(const from_headset::tracking &);

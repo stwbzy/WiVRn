@@ -66,7 +66,12 @@ public:
 	std::map<std::string, server_data> servers;
 	float preferred_refresh_rate = 0;
 	std::optional<float> minimum_refresh_rate;
+	// Resolution rendered by the PC application and transported to the client.
 	float resolution_scale = 1.0;
+	// Resolution of the projection texture submitted to OpenXR.  Keeping this
+	// separate lets Horizon OS perform the final layer-to-panel scaling.
+	float target_resolution_scale = 1.0;
+	wivrn::upscaling_mode upscaling = wivrn::upscaling_mode::native;
 	std::optional<wivrn::video_codec> codec;
 	uint32_t bitrate_bps = 50'000'000;
 	uint8_t bit_depth = 10;
@@ -81,6 +86,10 @@ public:
 
 	std::underlying_type_t<wivrn::from_headset::body_part_mask> body_part_mask =
 	        static_cast<std::underlying_type_t<wivrn::from_headset::body_part_mask>>(wivrn::from_headset::body_part_mask::max) - 1;
+
+	// Body-tracking policy and filtering preferences.  The legacy body_part_mask
+	// above remains separate for compatibility with older client.json files.
+	wivrn::body_tracking_settings body_tracking{};
 
 	bool enable_stream_gui = true;
 
@@ -113,7 +122,20 @@ public:
 	float override_foveation_distance = 3;
 
 	bool high_power_mode = true;
-	uint32_t fps_divider = 1;
+	wivrn::frame_synthesis_mode frame_synthesis = wivrn::frame_synthesis_mode::off;
+	// Where color-only frame synthesis should run. Auto negotiates the best
+	// endpoint capability and never silently enables an unknown backend.
+	wivrn::frame_synthesis_backend frame_synthesis_backend = wivrn::frame_synthesis_backend::auto_select;
+	// Set only while loading an old client.json.  The old divider path did not
+	// generate frames, so it is intentionally migrated to Off instead of being
+	// silently re-enabled as runtime ASW.
+	bool legacy_fps_divider_migrated = false;
+	// Set only when an invalid/legacy backend value was normalized to Auto while
+	// loading client.json.  It is intentionally not persisted.
+	bool frame_synthesis_backend_migrated = false;
+	// Set only while loading a client.json that used body_tracking for both the
+	// settings object and the feature flag.  It is intentionally not persisted.
+	bool body_tracking_settings_migrated = false;
 
 	// Allow unsafe config values
 	bool extended_config = false;

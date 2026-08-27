@@ -30,7 +30,8 @@ xr::swapchain::swapchain(
         int32_t width,
         int32_t height,
         int sample_count,
-        uint32_t array_size) :
+        uint32_t array_size,
+        bool transfer_source) :
         width_(width),
         height_(height),
         sample_count_(sample_count),
@@ -54,6 +55,8 @@ xr::swapchain::swapchain(
 			usage_flags = XR_SWAPCHAIN_USAGE_SAMPLED_BIT | XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
 			break;
 	}
+	if (transfer_source)
+		usage_flags |= XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT;
 
 	XrSwapchainCreateInfo create_info{
 	        .type = XR_TYPE_SWAPCHAIN_CREATE_INFO,

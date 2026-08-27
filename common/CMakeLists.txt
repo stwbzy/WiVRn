@@ -8,6 +8,7 @@ endif()
 configure_file(wivrn_config.h.in wivrn_config.h)
 
 add_library(wivrn-common-base STATIC EXCLUDE_FROM_ALL
+    frame_synthesis_policy.cpp
     utils/strings.cpp
     utils/xdg_base_directory.cpp
     ${CMAKE_BINARY_DIR}/version.cpp
@@ -25,6 +26,23 @@ add_library(wivrn-common STATIC EXCLUDE_FROM_ALL
     vk/vk_allocator.cpp
     vk/vk_mem_alloc.cpp
 )
+
+if (WIVRN_BUILD_TEST)
+	add_executable(frame-synthesis-policy-test frame_synthesis_policy_test.cpp)
+	target_compile_features(frame-synthesis-policy-test PRIVATE cxx_std_20)
+	target_link_libraries(frame-synthesis-policy-test PRIVATE wivrn-common-base)
+	add_test(NAME frame-synthesis-policy COMMAND frame-synthesis-policy-test)
+
+	add_executable(frame-synthesis-negotiation-test frame_synthesis_negotiation_test.cpp)
+	target_compile_features(frame-synthesis-negotiation-test PRIVATE cxx_std_20)
+	target_link_libraries(frame-synthesis-negotiation-test PRIVATE wivrn-common)
+	add_test(NAME frame-synthesis-negotiation COMMAND frame-synthesis-negotiation-test)
+
+	add_executable(body-tracking-protocol-test body_tracking_protocol_test.cpp)
+	target_compile_features(body-tracking-protocol-test PRIVATE cxx_std_23)
+	target_link_libraries(body-tracking-protocol-test PRIVATE wivrn-common)
+	add_test(NAME body-tracking-protocol COMMAND body-tracking-protocol-test)
+endif()
 
 if (WIVRN_BUILD_DASHBOARD OR WIVRN_BUILD_SERVER)
     add_library(wivrn-common-server STATIC EXCLUDE_FROM_ALL
@@ -44,6 +62,11 @@ if (WIVRN_BUILD_DASHBOARD OR WIVRN_BUILD_SERVER)
         add_executable(connection-lifecycle-test connection_lifecycle_test.cpp)
         target_compile_features(connection-lifecycle-test PRIVATE cxx_std_20)
         add_test(NAME connection-lifecycle COMMAND connection-lifecycle-test)
+
+		add_executable(scaling-watchdog-test scaling_watchdog_test.cpp)
+		target_compile_features(scaling-watchdog-test PRIVATE cxx_std_20)
+		target_link_libraries(scaling-watchdog-test PRIVATE wivrn-common)
+		add_test(NAME scaling-watchdog COMMAND scaling-watchdog-test)
 
         add_executable(list-apps
             test_application.cpp

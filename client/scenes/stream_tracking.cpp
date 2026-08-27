@@ -228,6 +228,57 @@ static xr::spaces device_to_space(device_id id)
 	}
 }
 
+static XrBodyTrackingFidelityMETA to_xr_body_tracking_fidelity(wivrn::body_tracking_fidelity fidelity)
+{
+	switch (fidelity)
+	{
+		case wivrn::body_tracking_fidelity::low:
+			return XR_BODY_TRACKING_FIDELITY_LOW_META;
+		case wivrn::body_tracking_fidelity::high:
+			return XR_BODY_TRACKING_FIDELITY_HIGH_META;
+		case wivrn::body_tracking_fidelity::automatic:
+		default:
+			// High has always been WiVRn's default when the META fidelity
+			// extension is available.
+			return XR_BODY_TRACKING_FIDELITY_HIGH_META;
+	}
+}
+
+static wivrn::body_tracking_calibration_state to_body_tracking_calibration_state(
+        std::optional<XrBodyTrackingCalibrationStateMETA> state)
+{
+	if (!state)
+		return wivrn::body_tracking_calibration_state::unknown;
+
+	switch (*state)
+	{
+		case XR_BODY_TRACKING_CALIBRATION_STATE_VALID_META:
+			return wivrn::body_tracking_calibration_state::valid;
+		case XR_BODY_TRACKING_CALIBRATION_STATE_CALIBRATING_META:
+			return wivrn::body_tracking_calibration_state::calibrating;
+		case XR_BODY_TRACKING_CALIBRATION_STATE_INVALID_META:
+			return wivrn::body_tracking_calibration_state::invalid;
+		default:
+			return wivrn::body_tracking_calibration_state::unknown;
+	}
+}
+
+static wivrn::body_tracking_fidelity to_body_tracking_fidelity(std::optional<XrBodyTrackingFidelityMETA> fidelity)
+{
+	if (!fidelity)
+		return wivrn::body_tracking_fidelity::automatic;
+
+	switch (*fidelity)
+	{
+		case XR_BODY_TRACKING_FIDELITY_LOW_META:
+			return wivrn::body_tracking_fidelity::low;
+		case XR_BODY_TRACKING_FIDELITY_HIGH_META:
+			return wivrn::body_tracking_fidelity::high;
+		default:
+			return wivrn::body_tracking_fidelity::automatic;
+	}
+}
+
 void scenes::stream::tracking()
 {
 #ifdef __ANDROID__
@@ -290,8 +341,113 @@ void scenes::stream::tracking()
 
 	const bool body_tracking = config.check_feature(feature::body_tracking);
 	xr::body_tracker body_tracker;
+	std::optional<wivrn::body_tracking_calibration_state> previous_meta_calibration;
+	std::optional<wivrn::body_tracking_calibration_mode> applied_calibration_mode;
 
 	locate_spaces_functor locate_spaces{instance, world_space};
+
+	const auto apply_body_settings = [&](xr::fb_body_tracker & tracker, const wivrn::body_tracking_settings & settings) {
+		const auto fidelity_result = tracker.request_fidelity(to_xr_body_tracking_fidelity(settings.fidelity));
+		if (!XR_SUCCEEDED(fidelity_result) and fidelity_result != XR_ERROR_FEATURE_UNSUPPORTED)
+			spdlog::warn("Unable to apply body tracking fidelity: {}", xr::to_string(fidelity_result));
+
+		if (settings.calibration_mode == wivrn::body_tracking_calibration_mode::automatic &&
+		    applied_calibration_mode == wivrn::body_tracking_calibration_mode::manual)
+		{
+			const auto reset_result = tracker.reset_calibration();
+			if (!XR_SUCCEEDED(reset_result) and reset_result != XR_ERROR_FEATURE_UNSUPPORTED)
+				spdlog::warn("Unable to clear manual body tracking height: {}", xr::to_string(reset_result));
+		}
+		if (settings.calibration_mode == wivrn::body_tracking_calibration_mode::manual && settings.body_height_mm)
+		{
+			const float height_m = static_cast<float>(*settings.body_height_mm) / 1000.f;
+			const auto height_result = tracker.suggest_calibration_override(height_m);
+			if (!XR_SUCCEEDED(height_result) and height_result != XR_ERROR_FEATURE_UNSUPPORTED)
+				spdlog::warn("Unable to apply body tracking height override: {}", xr::to_string(height_result));
+		}
+		applied_calibration_mode = settings.calibration_mode;
+	};
+
+	const auto recreate_body_tracker = [&](const wivrn::body_tracking_settings & settings) {
+		// Destroying the handle on this thread is important: the OpenXR body
+		// tracker must not be raced by a UI callback.  Recreate only FB/META
+		// trackers; HTC and Pico providers have no equivalent reset operation.
+		body_tracker.emplace<std::monostate>();
+		applied_calibration_mode.reset();
+		try
+		{
+			body_tracker = xr::make_body_tracker(
+			        instance,
+			        system,
+			        session,
+			        application::get_generic_trackers());
+			if (auto fb = std::get_if<xr::fb_body_tracker>(&body_tracker))
+				apply_body_settings(*fb, settings);
+		}
+		catch (const std::exception & e)
+		{
+			spdlog::warn("Unable to recreate body tracker after reset: {}", e.what());
+			body_tracker.emplace<std::monostate>();
+		}
+	};
+
+	const auto consume_body_tracking_resets = [&](bool body_requested) {
+		std::queue<pending_body_tracking_reset> pending;
+		{
+			auto requests = body_tracking_reset_requests.lock();
+			pending.swap(*requests);
+		}
+
+		while (!pending.empty())
+		{
+			const auto request = pending.front();
+			pending.pop();
+
+			const auto settings = application::get_config().body_tracking;
+			try
+			{
+				if (body_tracking && body_requested &&
+				    (request.scope == wivrn::body_tracking_reset::tracking || request.scope == wivrn::body_tracking_reset::all) &&
+				    (std::holds_alternative<xr::fb_body_tracker>(body_tracker) ||
+				     std::holds_alternative<std::monostate>(body_tracker)))
+				{
+					recreate_body_tracker(settings);
+				}
+
+				if (request.scope == wivrn::body_tracking_reset::calibration || request.scope == wivrn::body_tracking_reset::all)
+				{
+					if (auto fb = std::get_if<xr::fb_body_tracker>(&body_tracker))
+					{
+						const auto reset_result = fb->reset_calibration();
+						if (!XR_SUCCEEDED(reset_result) and reset_result != XR_ERROR_FEATURE_UNSUPPORTED)
+							spdlog::warn("Unable to reset body tracking calibration: {}", xr::to_string(reset_result));
+						apply_body_settings(*fb, settings);
+					}
+				}
+			}
+			catch (const std::exception & e)
+			{
+				// A reset is best effort.  Do not let a runtime rejecting an
+				// optional operation terminate the tracking loop.
+				spdlog::warn("Body tracking reset failed: {}", e.what());
+			}
+
+			const uint64_t epoch = body_epoch.fetch_add(1, std::memory_order_relaxed) + 1;
+			try
+			{
+				network_session->send_control(from_headset::body_tracking_reset_request{
+				        .request_id = request.request_id,
+				        .reset = request.scope,
+				        .body_epoch = epoch,
+				        .connection_generation = network_session->generation(),
+				});
+			}
+			catch (const std::exception & e)
+			{
+				spdlog::warn("Unable to report body tracking reset: {}", e.what());
+			}
+		}
+	};
 
 	on_interaction_profile_changed({});
 
@@ -361,14 +517,21 @@ void scenes::stream::tracking()
 						if (std::ranges::contains(pattern, device_id::BODY, &to_headset::tracking_control::sample::device))
 						{
 							if (std::holds_alternative<std::monostate>(body_tracker))
+							{
 								body_tracker = xr::make_body_tracker(
 								        instance,
 								        system,
 								        session,
 								        application::get_generic_trackers());
+								if (auto fb = std::get_if<xr::fb_body_tracker>(&body_tracker))
+									apply_body_settings(*fb, config.body_tracking);
+							}
 						}
 						else
+						{
 							body_tracker.emplace<std::monostate>();
+							applied_calibration_mode.reset();
+						}
 					}
 
 					std::ranges::sort(pattern, std::less{}, [frame_duration](const auto & i) { return -i.prediction_ns % frame_duration; });
@@ -383,6 +546,16 @@ void scenes::stream::tracking()
 					}
 				}
 			}
+
+			// Reset requests are only observed and acted upon by this tracking
+			// thread.  BODY is considered requested only when it is part of the
+			// current tracking pattern.
+			if (apply_body_tracking_settings_requested.exchange(false, std::memory_order_acq_rel))
+			{
+				if (auto fb = std::get_if<xr::fb_body_tracker>(&body_tracker))
+					apply_body_settings(*fb, application::get_config().body_tracking);
+			}
+			consume_body_tracking_resets(std::ranges::contains(pattern, device_id::BODY, &to_headset::tracking_control::sample::device));
 
 			hands.clear();
 			body.clear();
@@ -518,6 +691,23 @@ void scenes::stream::tracking()
 								                   auto packet = b.locate_spaces(at_time, world_space);
 								                   packet.timestamp = at_time;
 								                   packet.production_timestamp = tracking.production_timestamp;
+								                   if constexpr (requires { b.effective_calibration_status(); })
+								                   {
+									                   const auto calibration =
+									                           to_body_tracking_calibration_state(b.effective_calibration_status());
+									                   if (previous_meta_calibration &&
+									                       *previous_meta_calibration != wivrn::body_tracking_calibration_state::valid &&
+									                       calibration == wivrn::body_tracking_calibration_state::valid)
+									                   {
+										                   const auto epoch = body_epoch.fetch_add(1, std::memory_order_relaxed) + 1;
+										                   spdlog::info("Body calibration became valid; starting epoch {}", epoch);
+									                   }
+									                   previous_meta_calibration = calibration;
+									                   packet.calibration_state = calibration;
+									                   packet.fidelity = to_body_tracking_fidelity(b.effective_fidelity());
+								                   }
+								                   if constexpr (requires { packet.body_epoch; })
+									                   packet.body_epoch = body_epoch.load(std::memory_order_relaxed);
 								                   packet.connection_generation = tracking.connection_generation;
 								                   body.push_back(packet);
 							                   },
@@ -556,7 +746,11 @@ void scenes::stream::tracking()
 			{
 				try
 				{
-					network_session->send_control(fb->get_skeleton());
+					auto skeleton = fb->get_skeleton();
+					skeleton.body_epoch = body_epoch.load(std::memory_order_relaxed);
+					skeleton.connection_generation = network_session->generation();
+					network_session->send_control(std::move(skeleton));
+					fb->mark_skeleton_sent();
 				}
 				catch (std::exception & e)
 				{
@@ -612,6 +806,22 @@ void scenes::stream::tracking()
 void scenes::stream::operator()(to_headset::tracking_control && packet)
 {
 	*tracking_control.lock() = std::move(packet);
+}
+
+uint64_t scenes::stream::request_body_tracking_reset(wivrn::body_tracking_reset scope)
+{
+	if (scope == wivrn::body_tracking_reset::none)
+		return 0;
+
+	uint64_t request_id = next_body_tracking_reset_id.fetch_add(1, std::memory_order_relaxed);
+	if (request_id == 0)
+		request_id = next_body_tracking_reset_id.fetch_add(1, std::memory_order_relaxed);
+
+	body_tracking_reset_requests.lock()->push({
+	        .request_id = request_id,
+	        .scope = scope,
+	});
+	return request_id;
 }
 
 static device_id derived_from(device_id target)

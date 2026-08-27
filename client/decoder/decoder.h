@@ -46,6 +46,11 @@ public:
 		vk::ImageLayout & current_layout;
 		vk::Semaphore semaphore = nullptr;
 		uint64_t * semaphore_val = nullptr;
+		// Android MediaCodec frames keep their AHardwareBuffer alive through the
+		// concrete blit handle.  The opaque pointer lets an optional QCOM/EGL
+		// motion backend import the same decoded image without making the generic
+		// decoder interface depend on Android headers.
+		void * native_hardware_buffer = nullptr;
 	};
 
 public:

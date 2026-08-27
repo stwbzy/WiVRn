@@ -36,10 +36,12 @@
 #include "decoder/shard_accumulator.h"
 #include "inplace_vector.hpp"
 #include "spdlog/spdlog.h"
+#include "utils/i18n.h"
 #include "utils/named_thread.h"
 #include "utils/ranges.h"
 #include "wivrn_packets.h"
 #include <algorithm>
+#include <cmath>
 #include <mutex>
 #include <ranges>
 #include <thread>
@@ -173,6 +175,110 @@ static const std::array supported_depth_formats{
         vk::Format::eX8D24UnormPack32,
 };
 
+static bool has_format_features(vk::FormatFeatureFlags available, vk::FormatFeatureFlags required)
+{
+	return (available & required) == required;
+}
+
+static bool supports_headset_color_synthesis(vk::raii::PhysicalDevice & physical_device, vk::Format color_format)
+{
+	// capture_real() copies the completed defoveated swapchain image into
+	// private history, while synthesize() samples the history and renders into
+	// the same swapchain format.  Keep this probe stricter than the OpenXR
+	// format probe so a capability is never advertised for a partial path.
+	const auto color = physical_device.getFormatProperties(color_format);
+	const auto required_color = vk::FormatFeatureFlagBits::eSampledImage |
+	                            vk::FormatFeatureFlagBits::eTransferSrc |
+	                            vk::FormatFeatureFlagBits::eTransferDst |
+	                            vk::FormatFeatureFlagBits::eColorAttachment;
+	const auto flow = physical_device.getFormatProperties(vk::Format::eR16G16B16A16Sfloat);
+	const auto required_flow = vk::FormatFeatureFlagBits::eSampledImage |
+	                           vk::FormatFeatureFlagBits::eStorageImage;
+	return has_format_features(color.optimalTilingFeatures, required_color) &&
+	       has_format_features(flow.optimalTilingFeatures, required_flow);
+}
+
+static float pose_delta_degrees(const XrPosef & previous, const XrPosef & current)
+{
+	const glm::quat previous_q{previous.orientation.w,
+	                           previous.orientation.x,
+	                           previous.orientation.y,
+	                           previous.orientation.z};
+	const glm::quat current_q{current.orientation.w,
+                          current.orientation.x,
+                          current.orientation.y,
+                          current.orientation.z};
+	const auto previous_n = glm::normalize(previous_q);
+	const auto current_n = glm::normalize(current_q);
+	const float cosine = std::clamp(std::abs(glm::dot(previous_n, current_n)), 0.0f, 1.0f);
+	return glm::degrees(2.0f * std::acos(cosine));
+}
+
+static bool fov_continuous(const XrFovf & previous, const XrFovf & current)
+{
+	constexpr float epsilon = 1e-4f;
+	return std::abs(previous.angleLeft - current.angleLeft) <= epsilon &&
+	       std::abs(previous.angleRight - current.angleRight) <= epsilon &&
+	       std::abs(previous.angleUp - current.angleUp) <= epsilon &&
+	       std::abs(previous.angleDown - current.angleDown) <= epsilon;
+}
+
+static wivrn::frame_synthesis_stereo_metrics make_synthesis_metrics(
+	        const std::optional<scenes::stream_synthesizer::frame_metadata> & previous,
+	        const std::array<XrPosef, 2> & pose,
+	        const std::array<XrFovf, 2> & fov,
+	        uint64_t connection_generation,
+	        float gpu_time,
+	        XrDuration display_period,
+	        bool missed_interval)
+{
+	wivrn::frame_synthesis_stereo_metrics metrics;
+	metrics.history_valid = previous.has_value();
+	metrics.generation_continuous = previous && previous->connection_generation == connection_generation;
+	metrics.fov_continuous = previous &&
+	                        fov_continuous(previous->fov[0], fov[0]) &&
+	                        fov_continuous(previous->fov[1], fov[1]);
+	metrics.stereo_valid = true;
+	for (size_t eye = 0; eye < 2; ++eye)
+	{
+		auto & metric = eye == 0 ? metrics.left : metrics.right;
+		metric.history_valid = previous.has_value();
+		metric.generation_continuous = metrics.generation_continuous;
+		metric.fov_continuous = previous && fov_continuous(previous->fov[eye], fov[eye]);
+		metric.pose_delta_degrees = previous ? pose_delta_degrees(previous->pose[eye], pose[eye]) : 0.0f;
+		metric.correlation = 1.0f;
+		metric.histogram_distance = 0.0f;
+		metric.consistency_bad_fraction = 0.0f;
+		metric.consistency_error_px = 0.0f;
+		metric.hole_fraction = 0.0f;
+		metric.flow_p95_fraction = 0.0f;
+		metric.thermal_severity = 0.0f;
+		metric.deadline_utilization = display_period > 0 ? std::max(0.0f, gpu_time / (float(display_period) * 1e-9f)) : 0.0f;
+		metric.pipeline_utilization = metric.deadline_utilization;
+		metric.application_utilization = 1.0f;
+		metric.deadline_missed = missed_interval;
+	}
+	return metrics;
+}
+
+static wivrn::upscaling_mode effective_client_upscaling(const from_headset::headset_info_packet & info)
+{
+	const bool upscale = info.target_eye_width > info.render_eye_width &&
+	                     info.target_eye_height > info.render_eye_height;
+	const bool meaningful = upscale &&
+	                        (uint64_t(info.target_eye_width) * 10 >= uint64_t(info.render_eye_width) * 11 ||
+	                         uint64_t(info.target_eye_height) * 10 >= uint64_t(info.render_eye_height) * 11);
+	if (info.upscaling == upscaling_mode::native)
+		return upscaling_mode::native;
+	if (!meaningful)
+		return info.meta_compositor_available ? upscaling_mode::meta_compositor : upscaling_mode::bilinear;
+	if (info.upscaling == upscaling_mode::meta_compositor && !info.meta_compositor_available)
+		return upscaling_mode::bilinear;
+	if (info.upscaling == upscaling_mode::nis)
+		return info.meta_compositor_available ? upscaling_mode::meta_compositor : upscaling_mode::bilinear;
+	return info.upscaling;
+}
+
 scenes::stream::stream(std::string server_name, scene & parent_scene) :
         scene_impl<stream>(supported_color_formats, supported_depth_formats, parent_scene),
         apps{*this, std::move(server_name)}
@@ -215,6 +321,28 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 	std::shared_ptr<stream> self{new stream{std::move(server_name), parent_scene}};
 	self->network_session = std::move(network_session);
 	self->transition_connection(client_connection_state::connecting);
+	self->headset_color_capable = supports_headset_color_synthesis(self->physical_device, self->swapchain_format);
+	try
+	{
+		self->qcom_motion_probe = frame_synthesis::create_motion_estimator();
+		if (self->qcom_motion_probe)
+		{
+			const auto & capabilities = self->qcom_motion_probe->capabilities();
+			spdlog::info("QCOM motion probe: backend={} available={} reason={}",
+			             frame_synthesis::to_string(capabilities.backend),
+			             capabilities.available(),
+			             capabilities.reason);
+		}
+	}
+	catch (const std::exception & e)
+	{
+		// The probe is diagnostic and must never prevent the Vulkan fallback.
+		spdlog::warn("QCOM motion probe failed; keeping Vulkan fallback: {}", e.what());
+	}
+	if (self->headset_color_capable)
+		spdlog::info("Headset color synthesis capability advertised (format/usages supported)");
+	else
+		spdlog::info("Headset color synthesis capability not advertised (Vulkan format/usages unsupported)");
 
 	self->reconnect_info = [&]() {
 		from_headset::headset_info_packet info{
@@ -245,7 +373,14 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 			info.native_eye_height = view.recommendedImageRectHeight;
 			info.render_eye_width = view.recommendedImageRectWidth * config.resolution_scale;
 			info.render_eye_height = view.recommendedImageRectHeight * config.resolution_scale;
+			info.target_eye_width = view.recommendedImageRectWidth * config.target_resolution_scale;
+			info.target_eye_height = view.recommendedImageRectHeight * config.target_resolution_scale;
 		}
+		info.upscaling = config.upscaling;
+		info.meta_compositor_available = application::get_openxr_post_processing_supported() ||
+		                                 application::get_automatic_layer_filter_supported();
+		if (self->headset_color_capable)
+			info.frame_synthesis_capabilities |= uint8_t(frame_synthesis_capability::headset_color);
 
 		{
 			auto scale = config.get_stream_scale();
@@ -259,7 +394,8 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 			info.settings.preferred_refresh_rate = config.preferred_refresh_rate;
 			info.settings.minimum_refresh_rate = config.minimum_refresh_rate.value_or(0);
 		}
-		info.settings.fps_divider = config.fps_divider;
+		info.settings.frame_synthesis = config.frame_synthesis;
+		info.settings.frame_synthesis_backend = config.frame_synthesis_backend;
 
 		if (info.available_refresh_rates.empty())
 		{
@@ -271,6 +407,7 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 		info.settings.bitrate_bps = config.bitrate_bps;
 		info.settings.mirror_gamepad = config.forward_gamepad;
 		info.settings.enabled_body_parts = config.body_part_mask;
+		info.settings.body_tracking = config.body_tracking;
 
 		info.hand_tracking = config.check_feature(feature::hand_tracking);
 		info.eye_gaze = config.check_feature(feature::eye_gaze);
@@ -347,8 +484,30 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 		else
 			info.supported_codecs = decoder::supported_codecs();
 
+		spdlog::info("Stream image policy: requested={} render={}x{} target={}x{} native={}x{} meta_filter={}",
+		             magic_enum::enum_name(info.upscaling),
+		             info.render_eye_width,
+		             info.render_eye_height,
+		             info.target_eye_width,
+		             info.target_eye_height,
+		             info.native_eye_width,
+		             info.native_eye_height,
+		             info.meta_compositor_available ? "available" : "unavailable");
+
 		return info;
 	}();
+	self->requested_upscaling = self->reconnect_info.upscaling;
+	self->initial_effective_upscaling = effective_client_upscaling(self->reconnect_info);
+	self->effective_upscaling = self->initial_effective_upscaling;
+	self->scaling_watchdog.emplace(self->initial_effective_upscaling,
+	                               self->reconnect_info.meta_compositor_available);
+	spdlog::info("Client scaling path: requested={} effective={} render={}x{} target={}x{}",
+	             magic_enum::enum_name(self->requested_upscaling),
+	             magic_enum::enum_name(self->initial_effective_upscaling),
+	             self->reconnect_info.render_eye_width,
+	             self->reconnect_info.render_eye_height,
+	             self->reconnect_info.target_eye_width,
+	             self->reconnect_info.target_eye_height);
 	self->network_session->send_control(from_headset::headset_info_packet{self->reconnect_info});
 
 	self->network_session->send_control(from_headset::session_state_changed{
@@ -915,6 +1074,107 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		}
 	}
 
+	if (reset_frame_synthesis_requested.exchange(false))
+	{
+		if (synthesizer)
+			synthesizer->reset();
+		latest_real_metadata.reset();
+		last_headset_real_frame_index = UINT64_MAX;
+		synthesis_policy.reset();
+		headset_color_was_active = false;
+		headset_synthesis_session_disabled = false;
+		headset_real_frame_count = 0;
+		headset_generated_frame_count = 0;
+		headset_pose_only_frame_count = 0;
+		headset_rejected_frame_count = 0;
+		headset_synthesis_gpu_time = 0.0f;
+		headset_fallback_reason = frame_synthesis_reason::none;
+	}
+
+	if (reset_scaling_watchdog_requested.exchange(false))
+	{
+		effective_upscaling = initial_effective_upscaling;
+		scaling_watchdog.emplace(initial_effective_upscaling, reconnect_info.meta_compositor_available);
+		real_frame_count = 0;
+		synthetic_frame_count = 0;
+		last_counted_frame_index = UINT64_MAX;
+		client_scaling_fallback_reason = runtime_fallback_reason::none;
+		meta_filter_tuning = {};
+		spdlog::info("Scaling watchdog reset after reconnect: effective={}",
+		             magic_enum::enum_name(initial_effective_upscaling));
+	}
+	if (scaling_watchdog && frame_state.predictedDisplayPeriod > 0)
+	{
+		const bool missed_interval = real_display_period.load() > frame_state.predictedDisplayPeriod * 3 / 2;
+		if (auto fallback = scaling_watchdog->sample(
+		            timestamps.gpu_time,
+		            float(frame_state.predictedDisplayPeriod) * 1e-9f,
+		            missed_interval))
+		{
+			effective_upscaling = fallback->to;
+			client_scaling_fallback_reason = fallback->reason;
+			spdlog::warn("Client scaling fallback: {} -> {}, reason={}, p95={:.3f}ms, missed={:.2f}% (saved preference unchanged)",
+			             magic_enum::enum_name(fallback->from),
+			             magic_enum::enum_name(fallback->to),
+			             magic_enum::enum_name(fallback->reason),
+			             fallback->p95_seconds * 1000,
+			             fallback->missed_percent);
+			auto toast = gui_toast.lock();
+			toast->emplace(fmt::format(_cF("scaling fallback toast", "Upscaling changed to {} for this session to protect frame rate."),
+			                           magic_enum::enum_name(fallback->to)),
+			               true);
+		}
+	}
+
+	const auto configured_layer_settings = application::get_config().openxr_post_processing;
+	const bool tune_meta_filter = effective_upscaling.load() == upscaling_mode::meta_compositor &&
+	                              !application::get_automatic_layer_filter_supported() &&
+	                              (configured_layer_settings.sharpening |
+	                               configured_layer_settings.super_sampling) == 0 &&
+	                              !meta_filter_tuning.complete;
+	if (tune_meta_filter && frame_state.predictedDisplayPeriod > 0)
+	{
+		meta_filter_tuning.frames++;
+		meta_filter_tuning.missed +=
+		        real_display_period.load() > frame_state.predictedDisplayPeriod * 3 / 2;
+		if (meta_filter_tuning.frames >= scaling_watchdog::window_frames)
+		{
+			const float missed_percent = 100.0f * meta_filter_tuning.missed /
+			                             meta_filter_tuning.frames;
+			const bool viable = missed_percent <= 1.0f;
+			if (meta_filter_tuning.candidate == 0)
+			{
+				meta_filter_tuning.normal_viable = viable;
+				meta_filter_tuning.candidate = 1;
+				meta_filter_tuning.frames = 0;
+				meta_filter_tuning.missed = 0;
+				spdlog::info("Meta compositor normal-filter trial complete: missed={:.2f}% viable={}",
+				             missed_percent,
+				             viable);
+			}
+			else
+			{
+				const bool upscale = reconnect_info.target_eye_width >= reconnect_info.render_eye_width;
+				meta_filter_tuning.selected = meta_filter_tuning.normal_viable
+				                                      ? (upscale ? XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SHARPENING_BIT_FB
+				                                                 : XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SUPER_SAMPLING_BIT_FB)
+				                                      : (viable ? (upscale ? XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SHARPENING_BIT_FB
+				                                                           : XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SUPER_SAMPLING_BIT_FB)
+				                                                : 0);
+				meta_filter_tuning.complete = true;
+				spdlog::info("Meta compositor quality-filter trial complete: missed={:.2f}% viable={} selected={}",
+				             missed_percent,
+				             viable,
+				             meta_filter_tuning.normal_viable ? "normal" : (viable ? "quality" : "fused-bilinear"));
+				if (meta_filter_tuning.selected == 0)
+				{
+					effective_upscaling = upscaling_mode::bilinear;
+					client_scaling_fallback_reason = runtime_fallback_reason::client_missed_intervals;
+				}
+			}
+		}
+	}
+
 	session.begin_frame();
 
 	std::array<int, view_count> image_indices;
@@ -935,9 +1195,27 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	// Search for frame with desired display time on all decoders
 	// If no such frame exists, use the latest frame for each decoder
 	current_blit_handles = common_frame(frame_state.predictedDisplayTime);
-	std::array<XrPosef, view_count> pose;
-	std::array<XrFovf, view_count> fov;
-	std::array<wivrn::to_headset::foveation_parameter, view_count> foveation;
+	const auto telemetry = *server_runtime_telemetry.lock();
+	const bool headset_color_active =
+	        headset_color_capable && telemetry.frame_synthesis_active &&
+	        telemetry.effective_frame_synthesis_backend == frame_synthesis_backend::headset_color;
+	if (headset_color_active != headset_color_was_active)
+	{
+		headset_color_was_active = headset_color_active;
+		synthesis_policy.set_mode(headset_color_active ? frame_synthesis_policy_mode::always
+		                                               : frame_synthesis_policy_mode::off);
+		synthesis_policy.reset();
+		if (not headset_color_active)
+		{
+			if (synthesizer)
+				synthesizer->reset();
+			latest_real_metadata.reset();
+			last_headset_real_frame_index = UINT64_MAX;
+		}
+	}
+	std::array<XrPosef, view_count> pose{};
+	std::array<XrFovf, view_count> fov{};
+	std::array<wivrn::to_headset::foveation_parameter, view_count> foveation{};
 	bool use_alpha = false;
 
 	std::array<stream_defoveator::input, view_count> images;
@@ -956,6 +1234,14 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			set_state(state::stalled);
 		++blit_handle->feedback.times_displayed;
 		blit_handle->feedback.displayed = frame_state.predictedDisplayTime;
+		if (i == 0 && blit_handle->feedback.frame_index != last_counted_frame_index)
+		{
+			last_counted_frame_index = blit_handle->feedback.frame_index;
+			if (blit_handle->view_info.synthetic)
+				++synthetic_frame_count;
+			else
+				++real_frame_count;
+		}
 
 		use_alpha = blit_handle->view_info.alpha;
 
@@ -1015,18 +1301,29 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		}
 	}
 
+	const auto & primary_handle = current_blit_handles[0];
+	const bool source_is_real = primary_handle && !primary_handle->view_info.synthetic;
+	const uint64_t source_frame_index = primary_handle ? primary_handle->feedback.frame_index : UINT64_MAX;
+	const bool has_new_real = source_is_real && source_frame_index != last_headset_real_frame_index;
+
 	// Allow the headset to time warp if we are redisplaying a frame
 	if ((not application::get_hmd_traits().discard_frame) or
 	    std::ranges::any_of(current_blit_handles, [](const auto & h) { return h and h->feedback.times_displayed < 2; }) or
 	    is_gui_interactable())
 	{
-		XrExtent2Di extents[view_count];
+		std::array<XrExtent2Di, view_count> extents;
 		{
 			int32_t max_width = 0;
 			int32_t max_height = 0;
+			const auto scaling = effective_upscaling.load();
 			for (size_t i = 0; i < view_count; ++i)
 			{
 				extents[i] = stream_defoveator::defoveated_size(foveation[i]);
+				if (scaling != upscaling_mode::native && reconnect_info.target_eye_width > 0 && reconnect_info.target_eye_height > 0)
+					extents[i] = {
+					        .width = reconnect_info.target_eye_width,
+					        .height = reconnect_info.target_eye_height,
+					};
 				max_width = std::max(max_width, extents[i].width);
 				max_height = std::max(max_height, extents[i].height);
 			}
@@ -1056,10 +1353,41 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			}
 		}
 		assert(swapchain);
-		// defoveate the image, apply scale/bias
 		int image_index = swapchain.acquire();
 		swapchain.wait();
 
+		const bool local_synthesis_ready = headset_color_active && !headset_synthesis_session_disabled &&
+		                                  synthesizer && synthesizer->available();
+		frame_synthesis_decision synthesis_decision;
+		if (headset_color_active)
+		{
+			if (not synthesizer || not synthesizer->available())
+			{
+				++headset_rejected_frame_count;
+				disable_headset_synthesis_for_session(frame_synthesis_reason::invalid_metric);
+			}
+			else
+			{
+				const bool missed_interval = real_display_period.load() > frame_state.predictedDisplayPeriod * 3 / 2;
+				const auto metrics = make_synthesis_metrics(
+				        latest_real_metadata,
+				        pose,
+				        fov,
+				        network_session->generation(),
+				        timestamps.gpu_time,
+				        frame_state.predictedDisplayPeriod,
+				        missed_interval);
+				synthesis_decision = synthesis_policy.update(metrics);
+				headset_fallback_reason = synthesis_decision.reason;
+				if (synthesis_decision.disable_session)
+					disable_headset_synthesis_for_session(synthesis_decision.reason);
+			}
+			headset_synthesis_gpu_time = timestamps.gpu_time;
+		}
+
+		// Keep GUI fade state in sync even when a repeat interval is served by
+		// the synthesizer.  A completed real output is captured only after the
+		// defoveation pass; generated output never enters that history.
 		switch (gui_status)
 		{
 			case stream_tab::hidden:
@@ -1082,12 +1410,97 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		const float scale = std::lerp(1, constants::stream::dimming_scale, x);
 		const float bias = std::lerp(0, constants::stream::dimming_bias, x);
 
-		defoveator->defoveate(command_buffer,
-		                      foveation,
-		                      images,
-		                      {scale, scale, scale, 1.},
-		                      {bias, bias, bias, 0.},
-		                      image_index);
+		bool need_defoveation = true;
+		bool output_is_generated = false;
+		bool synthesis_attempt_failed = false;
+		if (local_synthesis_ready && !has_new_real && source_is_real && latest_real_metadata &&
+		    synthesis_decision.synthesizes())
+		{
+			const auto generated = synthesizer->synthesize(
+			        command_buffer,
+			        stream_synthesizer::image_ref{
+			                .image = swapchain.image(image_index),
+			                .layout = vk::ImageLayout::eColorAttachmentOptimal,
+			        });
+			if (generated.generated())
+			{
+				pose = latest_real_metadata->pose;
+				fov = latest_real_metadata->fov;
+				++headset_generated_frame_count;
+				need_defoveation = false;
+				output_is_generated = true;
+			}
+			else if (generated.status == stream_synthesizer::synthesis_status::unavailable ||
+			         generated.status == stream_synthesizer::synthesis_status::invalid)
+			{
+				++headset_rejected_frame_count;
+				synthesis_attempt_failed = true;
+				disable_headset_synthesis_for_session(frame_synthesis_reason::invalid_metric);
+			}
+			else
+			{
+				pose = latest_real_metadata->pose;
+				fov = latest_real_metadata->fov;
+				++headset_pose_only_frame_count;
+			}
+		}
+
+		if (need_defoveation)
+		{
+			defoveator->defoveate(command_buffer,
+			                      foveation,
+			                      images,
+			                      {scale, scale, scale, 1.},
+			                      {bias, bias, bias, 0.},
+			                      image_index,
+			                      extents,
+			                      effective_upscaling.load());
+
+			if (local_synthesis_ready && has_new_real)
+			{
+				const stream_synthesizer::frame_metadata metadata{
+				        .frame_id = source_frame_index,
+				        .connection_generation = network_session->generation(),
+				        .display_time = primary_handle->view_info.display_time,
+				        .pose = pose,
+				        .fov = fov,
+				        .discontinuity = synthesis_decision.reset_history,
+				};
+				const auto capture = synthesizer->capture_real(
+				        command_buffer,
+				        stream_synthesizer::image_ref{
+				                .image = swapchain.image(image_index),
+				                .layout = vk::ImageLayout::eColorAttachmentOptimal,
+				        },
+				        metadata);
+				if (capture.accepted())
+				{
+					latest_real_metadata = metadata;
+					last_headset_real_frame_index = source_frame_index;
+					++headset_real_frame_count;
+				}
+				else
+				{
+					++headset_rejected_frame_count;
+					if (capture.status == stream_synthesizer::capture_status::unavailable)
+						disable_headset_synthesis_for_session(frame_synthesis_reason::invalid_metric);
+				}
+			}
+
+			if (local_synthesis_ready && !has_new_real && source_is_real && latest_real_metadata &&
+			    (!synthesis_decision.synthesizes() || synthesis_attempt_failed))
+			{
+				pose = latest_real_metadata->pose;
+				fov = latest_real_metadata->fov;
+				++headset_pose_only_frame_count;
+			}
+			else if (headset_color_active && primary_handle && !source_is_real)
+			{
+				// A server-generated frame must never be admitted to the client
+				// real history.  It is still rendered by normal defoveation.
+				++headset_rejected_frame_count;
+			}
+		}
 
 		command_buffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *query_pool, 1);
 
@@ -1098,14 +1511,17 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		inplace_vector<vk::Semaphore, decoder_count> semaphores;
 		inplace_vector<uint64_t, decoder_count> semaphore_vals;
 		inplace_vector<vk::PipelineStageFlags, decoder_count> wait_stages;
-		for (auto b: current_blit_handles)
+		if (!output_is_generated)
 		{
-			if (b and b->semaphore)
+			for (auto b: current_blit_handles)
 			{
-				assert(b->semaphore_val);
-				semaphores.push_back(b->semaphore);
-				semaphore_vals.push_back(*b->semaphore_val);
-				wait_stages.push_back(vk::PipelineStageFlagBits::eFragmentShader);
+				if (b and b->semaphore)
+				{
+					assert(b->semaphore_val);
+					semaphores.push_back(b->semaphore);
+					semaphore_vals.push_back(*b->semaphore_val);
+					wait_stages.push_back(vk::PipelineStageFlagBits::eFragmentShader);
+				}
 			}
 		}
 		submit_info.setWaitDstStageMask(wait_stages);
@@ -1155,8 +1571,25 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		        application::space(xr::spaces::world),
 		        layer_view);
 
-		if (const configuration::openxr_post_processing_settings openxr_post_processing = application::get_config().openxr_post_processing;
-		    (openxr_post_processing.sharpening | openxr_post_processing.super_sampling) > 0)
+		auto openxr_post_processing = configured_layer_settings;
+		if (effective_upscaling.load() == upscaling_mode::meta_compositor &&
+		    !application::get_automatic_layer_filter_supported() &&
+		    (openxr_post_processing.sharpening | openxr_post_processing.super_sampling) == 0)
+		{
+			const bool upscale = reconnect_info.target_eye_width >= reconnect_info.render_eye_width;
+			const auto automatic_flags = meta_filter_tuning.complete
+			                                     ? meta_filter_tuning.selected
+			                                     : (meta_filter_tuning.candidate == 0
+			                                                ? (upscale ? XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SHARPENING_BIT_FB
+			                                                           : XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SUPER_SAMPLING_BIT_FB)
+			                                                : (upscale ? XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SHARPENING_BIT_FB
+			                                                           : XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SUPER_SAMPLING_BIT_FB));
+			if (upscale)
+				openxr_post_processing.sharpening = automatic_flags;
+			else
+				openxr_post_processing.super_sampling = automatic_flags;
+		}
+		if ((openxr_post_processing.sharpening | openxr_post_processing.super_sampling) > 0)
 			set_layer_settings(openxr_post_processing.sharpening | openxr_post_processing.super_sampling);
 
 		accumulate_metrics(frame_state.predictedDisplayTime, current_blit_handles, timestamps);
@@ -1190,7 +1623,13 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			if (handle)
 			{
 				auto & packet = packets.emplace_back();
-				wivrn_session::control_socket_t::serialize(packet, feedbacks.emplace_back(handle->feedback));
+				// This batched path serializes packets before send_control(), so it
+				// cannot rely on the generic sender to stamp the active transport
+				// generation.  Without this, both eye display-feedback packets are
+				// rejected after every reconnect (2 * refresh_rate per second).
+				auto & feedback = feedbacks.emplace_back(handle->feedback);
+				feedback.connection_generation = network_session->generation();
+				wivrn_session::control_socket_t::serialize(packet, feedback);
 			}
 		}
 		if (not packets.empty())
@@ -1293,6 +1732,10 @@ uint32_t scenes::stream::reconnect_remaining_seconds() const
 void scenes::stream::reset_stream_resources()
 {
 	audio_handle.reset();
+	// The network thread can request a reconnect while the render thread is
+	// still recording a command buffer.  Defer touching Vulkan/history state to
+	// render(), after the previous fence has completed.
+	reset_frame_synthesis_requested = true;
 	std::unique_lock decoder_lock(decoder_mutex);
 	std::unique_lock frame_lock(frames_mutex);
 	current_blit_handles.fill(nullptr);
@@ -1329,12 +1772,30 @@ void scenes::stream::setup_reprojection_swapchain(uint32_t swapchain_width, uint
 	assert(swapchain_width);
 	assert(swapchain_height);
 	device.waitIdle();
+	synthesizer.reset();
 	spdlog::info("swapchain setup, refresh rate {}", video_stream_description->refresh_rate);
 	session.set_refresh_rate(video_stream_description->refresh_rate);
 
 	auto views = system.view_configuration_views(viewconfig);
 
-	swapchain = xr::swapchain(instance, session, device, swapchain_format, swapchain_width, swapchain_height, 1, views.size());
+	// The synthesizer captures real output after defoveation.  The explicit
+	// transfer-source usage is limited to this stream swapchain; other scene
+	// swapchains keep their existing usage contract.  Some runtimes reject the
+	// extra usage even when Vulkan format features look sufficient, so retain a
+	// functional non-SSW path rather than failing the stream scene.
+	try
+	{
+		swapchain = xr::swapchain(instance, session, device, swapchain_format, swapchain_width, swapchain_height, 1, views.size(), true);
+	}
+	catch (const std::exception & e)
+	{
+		if (!headset_color_capable)
+			throw;
+		spdlog::warn("OpenXR rejected stream transfer-source usage; disabling headset color synthesis for this session: {}", e.what());
+		headset_color_capable = false;
+		disable_headset_synthesis_for_session(frame_synthesis_reason::invalid_metric);
+		swapchain = xr::swapchain(instance, session, device, swapchain_format, swapchain_width, swapchain_height, 1, views.size(), false);
+	}
 	spdlog::info("Created stream swapchain: {}x{}", swapchain.width(), swapchain.height());
 	for (auto view: views)
 	{
@@ -1351,6 +1812,58 @@ void scenes::stream::setup_reprojection_swapchain(uint32_t swapchain_width, uint
 	        swapchain.images(),
 	        extent,
 	        swapchain.format());
+
+	if (headset_color_capable)
+	{
+		synthesizer.emplace(
+		        device,
+		        physical_device,
+		        stream_synthesizer::configuration{
+		                .extent = extent,
+		                .format = swapchain.format(),
+		                .output_images = swapchain.images(),
+		                .confidence_threshold = 0.35f,
+		        });
+		if (synthesizer->available())
+			spdlog::info("Initialized Vulkan headset color synthesizer for {}x{}", extent.width, extent.height);
+		else
+			spdlog::warn("Vulkan headset color synthesizer unavailable: {}", synthesizer->unavailable_reason());
+	}
+	latest_real_metadata.reset();
+	last_headset_real_frame_index = UINT64_MAX;
+	synthesis_policy.reset();
+	headset_color_was_active = false;
+	headset_synthesis_session_disabled = !headset_color_capable;
+}
+
+void scenes::stream::disable_headset_synthesis_for_session(wivrn::frame_synthesis_reason reason)
+{
+	if (headset_synthesis_session_disabled || not network_session)
+		return;
+
+	headset_synthesis_session_disabled = true;
+	headset_fallback_reason = reason;
+	const auto & config = application::get_config();
+	try
+	{
+		// This packet is intentionally temporary.  It changes only the live
+		// server session and leaves the persisted headset configuration untouched.
+		network_session->send_control(from_headset::settings_changed{
+		        .preferred_refresh_rate = config.preferred_refresh_rate,
+		        .minimum_refresh_rate = config.minimum_refresh_rate.value_or(0),
+		        .frame_synthesis = frame_synthesis_mode::off,
+		        .frame_synthesis_backend = frame_synthesis_backend::auto_select,
+		        .bitrate_bps = config.bitrate_bps,
+			        .mirror_gamepad = config.forward_gamepad,
+			        .enabled_body_parts = config.body_part_mask,
+			        .body_tracking = config.body_tracking,
+			});
+		spdlog::warn("Disabled headset color synthesis for this session: {}", magic_enum::enum_name(reason));
+	}
+	catch (const std::exception & e)
+	{
+		spdlog::warn("Unable to send temporary headset synthesis disable: {}", e.what());
+	}
 }
 
 scene::meta & scenes::stream::get_meta_scene()

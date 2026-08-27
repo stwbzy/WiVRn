@@ -156,8 +156,8 @@ done
 
 ## Validation status
 
-Verified on 2026-08-09 with a Quest 3S, Android NDK `29.0.14206865`, and the
-matching build-tree server:
+Verified initially on 2026-08-09 and rechecked on 2026-08-13 with a Quest 3S,
+Android NDK `29.0.14206865`, and the matching build-tree server:
 
 - debug and release Android builds completed;
 - the deterministic lifecycle unit test passed, including duplicate events,
@@ -169,6 +169,14 @@ matching build-tree server:
 - the final snapshot was `HeadsetConnected=true`, `streaming`, 3 attempts,
   2 successful reconnections, and 0 expirations;
 - server shutdown released the native session and PipeWire streams cleanly.
+- batched display feedback now carries the active connection generation; the
+  2026-08-13 physical run kept D-Bus `DiscardedPackets=0` and did not reproduce
+  the earlier 150-250 ms latency or VRChat head-motion vibration;
+- an ASW encode/network deadline fallback changed pacing back to real 72 Hz
+  frames without disconnecting the headset, losing tracking/audio or showing a
+  black screen;
+- duplicate server startup is rejected by an instance lock before it can
+  replace the live compositor socket or active OpenXR runtime.
 
 Still required before a release claim:
 
@@ -180,6 +188,8 @@ Still required before a release claim:
 - leak checks for native threads, locks, and persistent MediaCodec failures.
 
 The earlier frame-synthesis harness run validated metadata transport and
-lifecycle stability only. The newly ported 45-to-90 backend separately needs a
-fresh physical reconnection and long-duration run; see
+lifecycle stability only. The runtime backend has since produced real
+36-to-72 candidates on Quest 3S, but hit the encode/network watchdog after 182
+dispatches. Continuous synthesis, physical reconnection while ASW is active
+and long-duration operation remain separate release gates; see
 [fsr-frame-generation.md](fsr-frame-generation.md).

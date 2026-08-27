@@ -3,12 +3,34 @@ name: Build
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 env:
   BUILD_TYPE: Release
   SERVER_DEPS: libx264-dev libavcodec-dev libavutil-dev libbsd-dev libavahi-client-dev libavahi-glib-dev libeigen3-dev nlohmann-json3-dev librsvg2-dev libdrm-dev libglib2.0-dev-bin libpipewire-0.3-dev libcli11-dev libnotify-dev libarchive-dev libudev-dev
 
 jobs:
+  check-signing:
+    name: Check release signing key
+    runs-on: ubuntu-24.04
+    if: ${{ vars.APK_ONLY == '' }}
+    outputs:
+      available: ${{ steps.signing_check.outputs.available }}
+
+    steps:
+    - name: Check for APK signing key
+      id: signing_check
+      shell: bash
+      env:
+        APK_SIGNINGKEYPASSWORD: ${{ secrets.APK_SIGNINGKEYPASSWORD }}
+        APK_KEYSTORE_BASE64: ${{ secrets.APK_KEYSTORE_BASE64 }}
+      run: |
+        if [[ -n "$APK_SIGNINGKEYPASSWORD" && -n "$APK_KEYSTORE_BASE64" ]]; then
+          echo "available=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "available=false" >> "$GITHUB_OUTPUT"
+        fi
+
   build-linux:
     name: Linux
     runs-on: ubuntu-26.04
@@ -110,9 +132,9 @@ jobs:
 
     - name: Release build dependencies
       uses: softprops/action-gh-release@v2
-      if: startsWith(github.ref, 'refs/tags/') && matrix.config.preset == 'server'
+      if: ${{ github.ref_type == 'tag' && matrix.config.preset == 'server' }}
       with:
-        tag_name: ${{ inputs.ref }}
+        tag_name: ${{ github.ref_name }}
         generate_release_notes: true
         draft: true
         files: server-build-deps.tar.xz
@@ -142,6 +164,7 @@ jobs:
       with:
         manifest-path: flatpak/io.github.wivrn.wivrn.yml
         bundle: wivrn-server.flatpak
+        artifact-name: wivrn-server-x86_64.flatpak
         # The manifest is regenerated on every commit with the git hash embedded,
         # so its default (manifest-hash) cache key never hits. Key on the files
         # that actually define the dependency set instead, so the toolchain
@@ -215,20 +238,24 @@ jobs:
     - name: Check for Secret availability
       id: secret-check
       shell: bash
+      env:
+        APK_SIGNINGKEYPASSWORD: ${{ secrets.APK_SIGNINGKEYPASSWORD }}
+        APK_KEYSTORE_BASE64: ${{ secrets.APK_KEYSTORE_BASE64 }}
+        OCULUS_TOKEN: ${{ secrets.OCULUS_TOKEN }}
       run: |
-        if [[ "${{ secrets.APK_SIGNINGKEYPASSWORD }}" != '' && "${{ secrets.APK_KEYSTORE_BASE64 }}" != '' ]]; then
+        if [[ -n "$APK_SIGNINGKEYPASSWORD" && -n "$APK_KEYSTORE_BASE64" ]]; then
           echo "available=true" >> $GITHUB_OUTPUT;
         else
           echo "available=false" >> $GITHUB_OUTPUT;
         fi
-        if [[ "${{ secrets.OCULUS_TOKEN }}" != '' ]]; then
+        if [[ -n "$OCULUS_TOKEN" ]]; then
           echo "oculus-token=true" >> $GITHUB_OUTPUT;
         else
           echo "oculus-token=false" >> $GITHUB_OUTPUT;
         fi
 
     - name: Secrets
-      if: ${{ steps.secret-check.outputs.available == 'true' }}
+      if: ${{ github.event_name != 'pull_request' && steps.secret-check.outputs.available == 'true' }}
       env:
         APK_SIGNINGKEYPASSWORD: ${{ secrets.APK_SIGNINGKEYPASSWORD }}
         APK_KEYSTORE_BASE64: ${{ secrets.APK_KEYSTORE_BASE64 }}
@@ -409,8 +436,8 @@ jobs:
   release:
     name: Create release
     runs-on: ubuntu-22.04
-    needs: [build-linux, build-android, build-server-flatpak, build-ubuntu]
-    if: success() && startsWith(github.ref, 'refs/tags/')
+    needs: [check-signing, build-linux, build-android, build-server-flatpak, build-ubuntu]
+    if: ${{ success() && github.ref_type == 'tag' && needs.check-signing.outputs.available == 'true' }}
 
     steps:
     - uses: actions/checkout@v6
@@ -421,8 +448,10 @@ jobs:
     - name: Check for FLATHUB_TOKEN
       id: flathub-token-check
       shell: bash
+      env:
+        FLATHUB_TOKEN: ${{ secrets.FLATHUB_TOKEN }}
       run: |
-        if [[ "${{ secrets.FLATHUB_TOKEN}}" != '' ]]; then
+        if [[ -n "$FLATHUB_TOKEN" ]]; then
           echo "available=true" >> $GITHUB_OUTPUT;
         else
           echo "available=false" >> $GITHUB_OUTPUT;
@@ -451,7 +480,7 @@ jobs:
     - name: Release
       uses: softprops/action-gh-release@v3
       with:
-        tag_name: ${{ inputs.ref }}
+        tag_name: ${{ github.ref_name }}
         generate_release_notes: true
         draft: true
         files: |

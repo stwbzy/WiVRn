@@ -233,10 +233,41 @@ Interpret common failures as follows:
 | --- | --- |
 | `FSR 1 ... requested but inactive` | Render resolution is 100%, the APK is mismatched, or the requested scale exceeds the 4x output-area limit. |
 | `FSR 1 ... initialization failed` | EASU/RCAS Vulkan resources failed; the compositor keeps a complete linear/foveation fallback. |
-| `FSR frame generation is disabled in this build` | An old launch command still contains `WIVRN_FSR_FRAME_GENERATION`; this is expected and the normal compositor remains active. |
-| Headset at 120 Hz but server reports application 30 Hz / stream 60 Hz | A headset-side frame-rate feature is still active; remove all server and headset frame-generation settings for this test. |
-| Black screen or cadence changes | Stop the server, remove every `WIVRN_FSR_FRAME_GENERATION_*` variable, and restart the FSR-only command. |
+| `Server ASW active` | Runtime optical flow is pacing the game at half rate while encode/transport remains at headset refresh rate. |
+| `Server ASW disabled until reconnect` | Optical flow or encode/network deadlines failed three windows; real frames and headset ATW remain active. |
+| Black screen or cadence changes | Set Frame synthesis to Off, reconnect, and capture both server logs and the in-headset fallback telemetry. |
 | Server `90Hz`, client `100Hz` | The headset APK does not match this server build. |
+
+The controlled Quest 3S run on 2026-08-13 reached 36 Hz application pacing
+and 72 Hz encode/transport, dispatched 182 optical-flow candidates, then
+disabled synthesis with `encode_or_network_deadline`. During the active window
+the headset logged missing shards and stale frames. After fallback it returned
+to 72/72 without a disconnect or black screen. This is a successful safety
+transition, not evidence that Always mode is ready for normal use.
+
+Capture the relevant client evidence with:
+
+```bash
+adb logcat -v threadtime | \
+  rg -i 'WiVRn|VrApi|FrameSync|Drop shard|not sent|decoder'
+```
+
+`VrApi` should settle at the requested display rate after fallback. Repeated
+`frame ... was not sent because no shard was received`, rising `Stale`, or
+continuous `DiscardFrame` during synthesis identifies a missed full-rate
+delivery budget. Do not disable the watchdog to conceal those markers.
+
+Display feedback is tagged with the current connection generation in both the
+normal and batched send paths. Repeated server messages about mismatched
+feedback generations indicate a mismatched APK or a regression. Confirm the
+authenticated connection itself remains clean with:
+
+```bash
+busctl --user get-property io.github.wivrn.Server \
+  /io/github/wivrn/Server io.github.wivrn.Server DiscardedPackets
+```
+
+The expected value during a healthy current-generation session is zero.
 
 After a reconnect, there must be no temporal FSR state to restore: the encoder
 resets, emits a fresh IDR, and EASU/RCAS processes the next complete frame.
@@ -322,6 +353,18 @@ XRT_LOG=debug XRT_COMPOSITOR_LOG=debug wivrn-server
 ```
 
 The server will publish itself on the network via mDNS/Zeroconf for discovery by the HMD client.
+
+For this checkout, start the matching build-tree server with:
+
+```bash
+cd /home/stwby/Proyectos/WiVRn-fsr
+./build-server-no-system-boost/server/wivrn-server --early-active-runtime
+```
+
+Add `--no-fork` for a single foreground process while collecting a debugger
+backtrace. The server owns an instance lock; a second invocation should exit
+with `Another WiVRn server instance is already running` without changing the
+live compositor socket or OpenXR manifest.
 
 ### XR Applications
 
@@ -480,6 +523,35 @@ In xrizer, `RUST_LOG` follows the standard [`env_logger` semantics](https://docs
 
 The log is located at `$XDG_STATE_HOME/xrizer/xrizer.txt`, or `$HOME/.local/state/xrizer/xrizer.txt` if `$XDG_STATE_HOME` is not set.
 
+If VRChat opens in desktop mode, inspect its newest `output_log_*.txt` before
+calling the event an XRizer crash. This sequence means the OpenVR-to-OpenXR
+bridge loaded but could not find WiVRn's OpenXR runtime:
+
+```text
+[OpenVR] Could not initialize OpenVR. Error code: Init_InterfaceNotFound
+Initializing XR Failed
+XR Device: None
+```
+
+Check both runtime files and the live server:
+
+```bash
+ls -l "$HOME/.config/openvr/openvrpaths.vrpath"
+ls -l "$HOME/.config/openxr/1/active_runtime.json"
+pgrep -af wivrn-server
+```
+
+With this build tree, relaunching the single server with
+`--early-active-runtime` recreates the OpenXR entry before Steam starts the
+game. A successful VRChat launch logs `StartVRSDK: OpenVRLoader` followed by
+`[SteamVR] Initialized`, and the server identifies
+`application_name: 'VRChat'`.
+
+Before the 2026-08-13 fix, accidentally starting a second
+`--early-active-runtime` server could remove the first server's active runtime
+when the second instance failed. Runtime setup now happens only after the
+process obtains the instance lock.
+
 ---
 
 ## Environment Variables Reference
@@ -493,7 +565,8 @@ The log is located at `$XDG_STATE_HOME/xrizer/xrizer.txt`, or `$HOME/.local/stat
 | `OXR_VIEWPORT_SCALE_PERCENTAGE` | Per-application viewport scale (set on application, not server) | `100` |
 | `WIVRN_FSR_UPSCALING` | Reconstruct reduced render resolution to the headset-recommended size with FSR 1 EASU + RCAS | `0` |
 | `WIVRN_FSR_SHARPNESS` | RCAS sharpness in stops (`0` strongest, range `0`–`2`) | `0.2` |
-| `WIVRN_FSR_FRAME_GENERATION*` | Ignored by the default build; frame generation is paused for stability work | — |
+| `WIVRN_FSR_FRAME_GENERATION_SEARCH_RADIUS` | Advanced coarse optical-flow search radius (`1`–`4`) | `2` |
+| `WIVRN_DISABLE_FRAME_SYNTHESIS` | Force server-side frame synthesis off for diagnosis, regardless of the headset setting | unset |
 
 ### Debugging
 
@@ -531,7 +604,17 @@ Active runtime symlink:
 ls -la $HOME/.config/openxr/1/active_runtime.json
 ```
 
-Should point to `/usr/share/openxr/1/openxr_wivrn.json` or similar.
+Should point to `/usr/share/openxr/1/openxr_wivrn.json` or similar. When
+running from this checkout it should resolve to:
+
+```text
+/home/stwby/Proyectos/WiVRn-fsr/build-server-no-system-boost/openxr_wivrn-dev.json
+```
+
+If the file is absent while the headset is connected, stop any duplicate
+startup attempt and restart the one matching build-tree server with
+`--early-active-runtime`. Do not work around the problem by mixing an installed
+runtime with build-tree Monado libraries.
 
 Check runtime configuration:
 

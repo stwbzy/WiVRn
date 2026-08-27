@@ -31,6 +31,13 @@
 
 using hmd_permissions = magic_enum::containers::array<feature, const char *>;
 
+enum class hmd_performance_profile
+{
+	unknown,
+	quest_legacy, // Quest 1/2: prefer handing final scaling to Horizon OS.
+	quest_modern, // Quest Pro/3/3S: Meta compositor and SGSR1 are available.
+};
+
 class hmd_traits
 {
 public:
@@ -44,6 +51,7 @@ public:
 	//   export WIVRN_{PROPERTY-NAME}={property-value}
 	//   i.e. export WIVRN_VIEW_LOCATE=false
 	std::string controller_profile = "generic-trigger-squeeze";
+	hmd_performance_profile performance_profile = hmd_performance_profile::unknown;
 	std::string controller_ray_model = "assets://ray.glb";
 	hmd_permissions permissions{};
 	XrVersion max_openxr_api_version = XR_API_VERSION_1_1;

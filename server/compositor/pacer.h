@@ -21,6 +21,7 @@
 
 #include "wivrn_packets.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
@@ -71,6 +72,7 @@ private:
 	std::condition_variable compute_cv;
 	std::vector<frame_time> frame_times_compute;
 	std::jthread worker;
+	std::atomic<uint64_t> timing_generation = 0;
 
 	std::array<frame_info, 8> in_flight_frames;
 	uint64_t stream_frame_multiplier = 1;

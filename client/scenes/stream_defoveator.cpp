@@ -72,9 +72,12 @@ stream_defoveator::vertex * stream_defoveator::get_vertices(size_t view)
 	return reinterpret_cast<vertex *>(reinterpret_cast<uintptr_t>(buffer.map()) + view * vertices_size);
 }
 
-stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, vk::Sampler rgb, vk::Sampler a)
+stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view,
+                                                                   vk::Sampler rgb,
+                                                                   vk::Sampler a,
+                                                                   bool sgsr)
 {
-	auto & target = a ? pipeline_a[view] : pipeline_rgb[view];
+	auto & target = a ? pipeline_a[view][sgsr] : pipeline_rgb[view][sgsr];
 	if (*target.pipeline)
 		return target;
 
@@ -127,7 +130,8 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 	// Fragment shader
 	auto specialization = make_specialization_constants(
 	        int32_t(alpha),
-	        VkBool32(application::get_hmd_traits().needs_srgb_conversion));
+	        VkBool32(application::get_hmd_traits().needs_srgb_conversion),
+	        VkBool32(sgsr));
 	auto fragment_shader = load_shader(device, "reprojection.frag");
 
 	vk::pipeline_builder pipeline_info{
@@ -287,10 +291,12 @@ stream_defoveator::stream_defoveator(
 
 void stream_defoveator::reset_pipelines()
 {
-	for (auto & p: pipeline_rgb)
-		p = {};
-	for (auto & p: pipeline_a)
-		p = {};
+	for (auto & per_view: pipeline_rgb)
+		for (auto & p: per_view)
+			p = {};
+	for (auto & per_view: pipeline_a)
+		for (auto & p: per_view)
+			p = {};
 }
 
 static size_t required_vertices(const wivrn::to_headset::foveation_parameter & p)
@@ -308,7 +314,9 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
                                   const std::array<input, 2> & inputs,
                                   std::array<float, 4> scale,
                                   std::array<float, 4> bias,
-                                  int destination)
+                                  int destination,
+                                  const std::array<XrExtent2Di, 2> & output_sizes,
+                                  wivrn::upscaling_mode mode)
 {
 	if (destination < 0 || destination >= (int)output_images.size())
 		throw std::runtime_error("Invalid destination image index");
@@ -317,7 +325,15 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 
 	for (size_t view = 0; view < view_count; ++view)
 	{
-		const auto out_size = defoveated_size(foveation[view]);
+		const auto source_out_size = defoveated_size(foveation[view]);
+		const auto out_size = output_sizes[view];
+		if (out_size.width <= 0 || out_size.height <= 0 ||
+		    uint32_t(out_size.width) > output_extent.width || uint32_t(out_size.height) > output_extent.height)
+			throw std::runtime_error("Invalid defoveation output extent");
+		const glm::vec2 output_scale{
+		        float(out_size.width) / float(source_out_size.width),
+		        float(out_size.height) / float(source_out_size.height),
+		};
 		auto vertices = get_vertices(view);
 		const auto & [px, py] = foveation[view];
 		assert(px.size() % 2 == 1);
@@ -342,7 +358,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		        });
 
 		glm::uvec2 in(0);
-		glm::vec2 out(-0.5 * out_size.width, -0.5 * out_size.height); // pixel coordinates
+		glm::vec2 out(-0.5 * source_out_size.width, -0.5 * source_out_size.height); // source output pixels
 		glm::vec2 out_pixel_size(2. / out_size.width,
 		                         2. / out_size.height);
 		for (auto [iy, n_out_y]: utils::enumerate_range(py))
@@ -350,33 +366,33 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 			// number of output pixels per source pixels
 			const int ratio_y = std::abs(n_ratio_y - int(iy)) + 1;
 			in.x = 0;
-			out.x = -0.5 * out_size.width;
+			out.x = -0.5 * source_out_size.width;
 			for (auto [ix, n_out_x]: utils::enumerate_range(px))
 			{
 				const int ratio_x = std::abs(n_ratio_x - int(ix)) + 1;
 				*vertices++ = {
-				        .position = out * out_pixel_size,
+				        .position = (out * output_scale) * out_pixel_size,
 				        .uv = in,
 				};
 				*vertices++ = {
-				        .position = (out + glm::vec2(0, n_out_y * ratio_y)) * out_pixel_size,
+				        .position = ((out + glm::vec2(0, n_out_y * ratio_y)) * output_scale) * out_pixel_size,
 				        .uv = (in + glm::uvec2(0, n_out_y)),
 				};
 				in.x += n_out_x;
 				out.x += n_out_x * ratio_x;
 			}
 			*vertices++ = {
-			        .position = out * out_pixel_size,
+			        .position = (out * output_scale) * out_pixel_size,
 			        .uv = in,
 			};
 			in.y += n_out_y;
 			out.y += n_out_y * ratio_y;
 			*vertices++ = {
-			        .position = out * out_pixel_size,
+			        .position = (out * output_scale) * out_pixel_size,
 			        .uv = in,
 			};
 			*vertices++ = {
-			        .position = out * out_pixel_size,
+			        .position = (out * output_scale) * out_pixel_size,
 			        .uv = in,
 			};
 		}
@@ -394,7 +410,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		};
 
 		const auto & input = inputs[view];
-		auto & pipeline = ensure_pipeline(view, input.sampler_rgb, input.sampler_a);
+		auto & pipeline = ensure_pipeline(view, input.sampler_rgb, input.sampler_a, mode == wivrn::upscaling_mode::sgsr1);
 
 		std::array image_info{
 		        vk::DescriptorImageInfo{

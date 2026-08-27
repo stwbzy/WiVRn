@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+APP_ROOT=${APPDIR:-"$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"}
+export PATH="$APP_ROOT/usr/bin${PATH:+:$PATH}"
+export XDG_DATA_DIRS="$APP_ROOT/usr/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+export LD_LIBRARY_PATH="$APP_ROOT/usr/lib:$APP_ROOT/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+exec "$APP_ROOT/usr/bin/wivrn-server" "$@"

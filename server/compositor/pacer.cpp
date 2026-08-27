@@ -51,9 +51,11 @@ pacer::pacer(uint64_t frame_duration) :
 	        while (not t.stop_requested())
 	        {
 		        samples.clear();
+		        uint64_t sample_generation = 0;
 		        {
 			        std::unique_lock lock(compute_mutex);
 			        compute_cv.wait(lock);
+			        sample_generation = timing_generation.load();
 			        for (const auto & time: frame_times_compute)
 			        {
 				        if (time.decoded > time.present)
@@ -66,6 +68,8 @@ pacer::pacer(uint64_t frame_duration) :
 		        std::ranges::nth_element(samples, it);
 
 		        std::unique_lock lock(mutex);
+		        if (sample_generation != timing_generation.load())
+			        continue;
 		        safe_present_to_decoded_ns = *it + client_margin_ms.val * U_TIME_1MS_IN_NS;
 	        }
         })
@@ -220,7 +224,19 @@ pacer::frame_info pacer::present_to_info(int64_t present)
 
 void pacer::reset()
 {
-	std::lock_guard lock(mutex);
+	// A reconnect or a switch between full-rate and half-rate application
+	// pacing invalidates both the samples and the estimates derived from them.
+	// Keeping safe_present_to_decoded_ns from the previous cadence can make the
+	// compositor schedule frames hundreds of milliseconds early even after
+	// frame synthesis has been disabled.
+	std::scoped_lock lock(mutex, compute_mutex);
+	++timing_generation;
 	std::ranges::fill(frame_times, frame_time{});
+	std::ranges::fill(frame_times_compute, frame_time{});
+	last_ns = 0;
+	mean_wake_up_to_present_ns = 1'000'000;
+	safe_present_to_decoded_ns = 0;
+	mean_render_to_display_ns = 0;
+	last_wake_up_ns = 0;
 }
 } // namespace wivrn

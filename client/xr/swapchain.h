@@ -53,7 +53,11 @@ public:
 	        int32_t width,
 	        int32_t height,
 	        int sample_count = 1,
-	        uint32_t array_size = 1);
+	        uint32_t array_size = 1,
+	        // The stream synthesizer copies completed real frames before the
+	        // OpenXR composition step.  Keep this opt-in so UI/depth swapchains
+	        // retain their existing usage contract.
+	        bool transfer_source = false);
 
 	int32_t width() const
 	{

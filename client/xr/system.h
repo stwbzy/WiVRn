@@ -66,6 +66,8 @@ class system
 	passthrough_type passthrough;
 	body_tracker_type body_tracker;
 	face_tracker_type face_tracker;
+	bool meta_body_tracking_height_override_supported_ = false;
+	bool meta_body_tracking_fidelity_supported_ = false;
 
 public:
 	system() = default;
@@ -91,6 +93,8 @@ public:
 	XrSystemFacialTrackingPropertiesHTC htc_face_tracking_properties() const;
 	XrSystemBodyTrackingPropertiesFB fb_body_tracking_properties() const;
 	XrSystemPropertiesBodyTrackingFullBodyMETA meta_body_tracking_properties() const;
+	XrSystemPropertiesBodyTrackingCalibrationMETA meta_body_tracking_calibration_properties() const;
+	XrSystemPropertiesBodyTrackingFidelityMETA meta_body_tracking_fidelity_properties() const;
 	XrSystemBodyTrackingPropertiesBD bd_body_tracking_properties() const;
 
 	bool hand_tracking_supported() const;
@@ -98,6 +102,8 @@ public:
 	passthrough_type passthrough_supported() const;
 	face_tracker_type face_tracker_supported() const;
 	body_tracker_type body_tracker_supported() const;
+	bool meta_body_tracking_height_override_supported() const;
+	bool meta_body_tracking_fidelity_supported() const;
 
 	XrGraphicsRequirementsVulkan2KHR graphics_requirements() const;
 	vk::raii::PhysicalDevice physical_device(vk::raii::Instance & vulkan) const;

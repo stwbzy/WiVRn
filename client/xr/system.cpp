@@ -51,6 +51,14 @@ xr::system::system(xr::instance & inst, XrFormFactor formfactor)
 	if (hand_tracking_supported_ and inst.has_extension(XR_FB_HAND_TRACKING_MESH_EXTENSION_NAME))
 		hand_mesh_fb_supported_ = true;
 
+	// These properties are optional even when the corresponding body tracker
+	// extension is present.  Query them once and retain the effective runtime
+	// capabilities so callers never need to build an invalid property chain.
+	if (inst.has_extension(XR_META_BODY_TRACKING_CALIBRATION_EXTENSION_NAME))
+		meta_body_tracking_height_override_supported_ = meta_body_tracking_calibration_properties().supportsHeightOverride;
+	if (inst.has_extension(XR_META_BODY_TRACKING_FIDELITY_EXTENSION_NAME))
+		meta_body_tracking_fidelity_supported_ = meta_body_tracking_fidelity_properties().supportsBodyTrackingFidelity;
+
 	body_tracker = xr::body_tracker_supported(inst, *this);
 	face_tracker = xr::face_tracker_supported(inst, *this);
 }
@@ -224,6 +232,52 @@ XrSystemPropertiesBodyTrackingFullBodyMETA xr::system::meta_body_tracking_proper
 	return body_tracking_prop;
 }
 
+XrSystemPropertiesBodyTrackingCalibrationMETA xr::system::meta_body_tracking_calibration_properties() const
+{
+	if (!id)
+		throw std::invalid_argument("this");
+
+	XrSystemPropertiesBodyTrackingCalibrationMETA body_tracking_prop{
+	        .type = XR_TYPE_SYSTEM_PROPERTIES_BODY_TRACKING_CALIBRATION_META,
+	};
+
+	// Returning an all-false property structure when the extension was not
+	// enabled keeps this helper safe for capability probes.  OpenXR requires
+	// extension structures in a property chain to belong to an enabled
+	// extension.
+	if (!inst->has_extension(XR_META_BODY_TRACKING_CALIBRATION_EXTENSION_NAME))
+		return body_tracking_prop;
+
+	XrSystemProperties prop{
+	        .type = XR_TYPE_SYSTEM_PROPERTIES,
+	        .next = &body_tracking_prop,
+	};
+	CHECK_XR(xrGetSystemProperties(*inst, id, &prop));
+
+	return body_tracking_prop;
+}
+
+XrSystemPropertiesBodyTrackingFidelityMETA xr::system::meta_body_tracking_fidelity_properties() const
+{
+	if (!id)
+		throw std::invalid_argument("this");
+
+	XrSystemPropertiesBodyTrackingFidelityMETA body_tracking_prop{
+	        .type = XR_TYPE_SYSTEM_PROPERTIES_BODY_TRACKING_FIDELITY_META,
+	};
+
+	if (!inst->has_extension(XR_META_BODY_TRACKING_FIDELITY_EXTENSION_NAME))
+		return body_tracking_prop;
+
+	XrSystemProperties prop{
+	        .type = XR_TYPE_SYSTEM_PROPERTIES,
+	        .next = &body_tracking_prop,
+	};
+	CHECK_XR(xrGetSystemProperties(*inst, id, &prop));
+
+	return body_tracking_prop;
+}
+
 XrSystemBodyTrackingPropertiesBD xr::system::bd_body_tracking_properties() const
 {
 	if (!id)
@@ -289,6 +343,16 @@ xr::face_tracker_type xr::system::face_tracker_supported() const
 xr::body_tracker_type xr::system::body_tracker_supported() const
 {
 	return body_tracker;
+}
+
+bool xr::system::meta_body_tracking_height_override_supported() const
+{
+	return meta_body_tracking_height_override_supported_;
+}
+
+bool xr::system::meta_body_tracking_fidelity_supported() const
+{
+	return meta_body_tracking_fidelity_supported_;
 }
 
 bool xr::system::hand_tracking_supported() const

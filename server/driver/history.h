@@ -22,6 +22,7 @@
 #include "clock_offset.h"
 #include "util/u_time.h"
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <mutex>
 #include <openxr/openxr.h>
@@ -42,15 +43,12 @@ class history
 	std::mutex mutex;
 
 protected:
-	// return true if object is active (last request is not too old)
-	void add_sample(XrTime produced_timestamp, XrTime timestamp, const Data & sample, const clock_offset & offset)
+	void add_sample_server_time(XrTime produced, XrTime timestamp, const Data & sample, bool synchronized)
 	{
-		XrTime produced = offset.from_headset(produced_timestamp);
-		XrTime t = offset.from_headset(timestamp);
 		std::lock_guard lock(mutex);
 
 		TimedData * target = data.data();
-		if (offset)
+		if (synchronized)
 		{
 			for (auto & item: data)
 			{
@@ -58,7 +56,7 @@ protected:
 				if (item.produced_timestamp > produced)
 					return;
 
-				if (std::abs(item.at_timestamp_ns - t) < 2'000'000)
+				if (std::abs(item.at_timestamp_ns - timestamp) < 2'000'000)
 				{
 					target = &item;
 					break;
@@ -68,7 +66,23 @@ protected:
 					target = &item;
 			}
 		}
-		*target = TimedData(sample, produced, t);
+		*target = TimedData(sample, produced, timestamp);
+	}
+
+	// return true if object is active (last request is not too old)
+	void add_sample(XrTime produced_timestamp, XrTime timestamp, const Data & sample, const clock_offset & offset)
+	{
+		XrTime produced = offset.from_headset(produced_timestamp);
+		XrTime t = offset.from_headset(timestamp);
+		add_sample_server_time(produced, t, sample, bool(offset));
+	}
+
+	void replace_sample(XrTime produced_timestamp, XrTime timestamp, const Data & sample, const clock_offset & offset)
+	{
+		TimedData replacement(sample, offset.from_headset(produced_timestamp), offset.from_headset(timestamp));
+		std::lock_guard lock(mutex);
+		data.fill({});
+		data.front() = replacement;
 	}
 
 public:
@@ -103,7 +117,7 @@ public:
 
 		if (before and after)
 		{
-			float t = float(after->at_timestamp_ns - at_timestamp_ns) /
+			float t = float(at_timestamp_ns - before->at_timestamp_ns) /
 			          (after->at_timestamp_ns - before->at_timestamp_ns);
 			return {produced, static_cast<Derived *>(this)->interpolate(*before, *after, t)};
 		}

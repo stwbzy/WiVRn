@@ -42,7 +42,7 @@ set(XRT_FEATURE_OPENXR_FACE_TRACKING_ANDROID     ON)
 set(XRT_FEATURE_OPENXR_FACE_TRACKING2_FB         ON)
 set(XRT_FEATURE_OPENXR_FACIAL_TRACKING_HTC       ON)
 set(XRT_FEATURE_OPENXR_HAND_TRACKING_EXT         ON)
-set(XRT_FEATURE_OPENXR_FRAME_SYNTHESIS           ON CACHE BOOL "Enable XR_EXT_frame_synthesis metadata transport" FORCE)
+set(XRT_FEATURE_OPENXR_FRAME_SYNTHESIS           OFF CACHE BOOL "Do not expose application frame-synthesis metadata" FORCE)
 set(XRT_FEATURE_OPENXR_INTERACTION_EXT_HAND      ON)
 set(XRT_FEATURE_OPENXR_INTERACTION_EXT_PALM_POSE ON)
 set(XRT_FEATURE_OPENXR_INTERACTION_BYTEDANCE     ON)
@@ -50,7 +50,7 @@ set(XRT_FEATURE_OPENXR_INTERACTION_VIVE_FOCUS3   ON)
 set(XRT_FEATURE_OPENXR_INTERACTION_TOUCH_PRO     ON)
 set(XRT_FEATURE_OPENXR_INTERACTION_TOUCH_PLUS    ON)
 set(XRT_FEATURE_OPENXR_LAYER_COLOR_SCALE_BIAS    ON)
-set(XRT_FEATURE_OPENXR_SPACE_WARP                ON CACHE BOOL "Enable XR_FB_space_warp metadata transport" FORCE)
+set(XRT_FEATURE_OPENXR_SPACE_WARP                OFF CACHE BOOL "Do not expose XR_FB_space_warp/AppSW" FORCE)
 
 set(XRT_HAVE_BLUETOOTH               OFF)
 set(XRT_HAVE_GST                     OFF)
@@ -120,6 +120,7 @@ if (WIVRN_BUILD_SERVER)
 			driver/app_pacer.cpp
 			driver/clock_offset.cpp
 			driver/configuration.cpp
+			driver/fbt_supervisor.cpp
 			driver/hand_joints_list.cpp
 			driver/pose_list.cpp
 			driver/tracking_control.cpp
@@ -144,8 +145,7 @@ if (WIVRN_BUILD_SERVER)
 		)
 	target_compile_features(wivrn-server PRIVATE cxx_std_20)
 	target_compile_definitions(wivrn-server PRIVATE
-		VULKAN_HPP_NO_CONSTRUCTORS
-		WIVRN_ENABLE_EXPERIMENTAL_FRAME_GENERATION=$<BOOL:${WIVRN_ENABLE_EXPERIMENTAL_FRAME_GENERATION}>)
+		VULKAN_HPP_NO_CONSTRUCTORS)
 
 	target_include_directories(wivrn-server SYSTEM PRIVATE ${monado_SOURCE_DIR}/src/xrt/compositor/)
 	target_include_directories(wivrn-server PRIVATE .)
@@ -301,6 +301,25 @@ if (WIVRN_BUILD_SERVER)
 		target_include_directories(fsr-config-test PRIVATE .)
 		target_link_libraries(fsr-config-test PRIVATE wivrn-common wivrn-external)
 		add_test(NAME fsr-config COMMAND fsr-config-test)
+
+		add_executable(tracking-history-test driver/history_test.cpp)
+		target_compile_features(tracking-history-test PRIVATE cxx_std_20)
+		target_include_directories(tracking-history-test PRIVATE .)
+		target_link_libraries(tracking-history-test PRIVATE aux_util wivrn-common wivrn-external)
+		add_test(NAME tracking-history COMMAND tracking-history-test)
+
+		add_executable(virtual-tracker-dropout-filter-test driver/virtual_tracker_dropout_filter_test.cpp)
+		target_compile_features(virtual-tracker-dropout-filter-test PRIVATE cxx_std_20)
+		target_include_directories(virtual-tracker-dropout-filter-test PRIVATE .)
+		add_test(NAME virtual-tracker-dropout-filter COMMAND virtual-tracker-dropout-filter-test)
+
+		add_executable(fbt-supervisor-test
+			driver/fbt_supervisor.cpp
+			driver/fbt_supervisor_test.cpp)
+		target_compile_features(fbt-supervisor-test PRIVATE cxx_std_20)
+		target_include_directories(fbt-supervisor-test PRIVATE .)
+		target_link_libraries(fbt-supervisor-test PRIVATE aux_util)
+		add_test(NAME fbt-supervisor COMMAND fbt-supervisor-test)
 	endif()
 
 	configure_file(dist/wivrn.service.in wivrn.service)

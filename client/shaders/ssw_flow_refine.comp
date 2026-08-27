@@ -1,0 +1,150 @@
+#version 450
+
+// Refine residual flow at 1/4 resolution.  The coarse image is only a
+// predictor; both color inputs remain the two real history slots.
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2DArray previous_image;
+layout(set = 0, binding = 1) uniform sampler2DArray current_image;
+layout(set = 0, binding = 2) uniform sampler2DArray coarse_flow;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2DArray refined_flow;
+
+layout(push_constant) uniform flow_pc
+{
+	vec4 input_size; // full width, full height, inverse width, inverse height
+	vec4 parameters; // search radius, level scale, valid-eye mask, unused
+	vec4 q_rel[2]; // x, y, z, w; current eye -> previous eye
+	vec4 current_tan_rect[2]; // left, right, up, down
+	vec4 previous_tan_rect[2]; // left, right, up, down
+};
+
+float luma(vec3 color)
+{
+	return dot(color, vec3(0.2126, 0.7152, 0.0722));
+}
+
+vec3 rotate_vector(vec4 q, vec3 value)
+{
+	return value + 2.0 * cross(q.xyz, cross(q.xyz, value) + q.w * value);
+}
+
+bool valid_uv(vec2 uv)
+{
+	return all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)));
+}
+
+bool valid_eye(int eye)
+{
+	if ((int(round(parameters.z)) & (1 << eye)) == 0)
+		return false;
+	vec4 q = q_rel[eye];
+	vec4 current_rect = current_tan_rect[eye];
+	vec4 previous_rect = previous_tan_rect[eye];
+	if (any(isnan(q)) || any(isinf(q)) || any(isnan(current_rect)) || any(isinf(current_rect)) ||
+	    any(isnan(previous_rect)) || any(isinf(previous_rect)))
+		return false;
+	return dot(q, q) > 0.5 && current_rect.y - current_rect.x > 1e-6 &&
+	       current_rect.z - current_rect.w > 1e-6 && previous_rect.y - previous_rect.x > 1e-6 &&
+	       previous_rect.z - previous_rect.w > 1e-6;
+}
+
+vec2 tangent_from_uv(vec2 uv, vec4 tangent_rect)
+{
+	return vec2(
+	        mix(tangent_rect.x, tangent_rect.y, uv.x),
+	        mix(tangent_rect.z, tangent_rect.w, uv.y));
+}
+
+vec2 uv_from_tangent(vec2 tangent, vec4 tangent_rect)
+{
+	return vec2(
+	        (tangent.x - tangent_rect.x) / (tangent_rect.y - tangent_rect.x),
+	        (tangent_rect.z - tangent.y) / (tangent_rect.z - tangent_rect.w));
+}
+
+bool current_to_previous_uv(vec2 current_uv, int eye, out vec2 previous_uv)
+{
+	if (!valid_eye(eye) || !valid_uv(current_uv))
+		return false;
+	vec2 current_tangent = tangent_from_uv(current_uv, current_tan_rect[eye]);
+	vec3 current_ray = normalize(vec3(current_tangent, -1.0));
+	vec3 previous_ray = rotate_vector(q_rel[eye], current_ray);
+	if (previous_ray.z >= -1e-5)
+		return false;
+	previous_uv = uv_from_tangent(-previous_ray.xy / previous_ray.z, previous_tan_rect[eye]);
+	return valid_uv(previous_uv);
+}
+
+bool previous_to_current_uv(vec2 previous_uv, int eye, out vec2 current_uv)
+{
+	if (!valid_eye(eye) || !valid_uv(previous_uv))
+		return false;
+	vec2 previous_tangent = tangent_from_uv(previous_uv, previous_tan_rect[eye]);
+	vec3 previous_ray = normalize(vec3(previous_tangent, -1.0));
+	vec4 q = q_rel[eye];
+	vec3 current_ray = rotate_vector(vec4(-q.xyz, q.w), previous_ray);
+	if (current_ray.z >= -1e-5)
+		return false;
+	current_uv = uv_from_tangent(-current_ray.xy / current_ray.z, current_tan_rect[eye]);
+	return valid_uv(current_uv);
+}
+
+float matching_cost(vec2 current_uv, vec2 previous_uv, int eye, float current_luma)
+{
+	float previous_luma = luma(textureLod(previous_image, vec3(previous_uv, float(eye)), 0.0).rgb);
+	return abs(previous_luma - current_luma);
+}
+
+void main()
+{
+	ivec3 pixel = ivec3(gl_GlobalInvocationID);
+	ivec3 output_dimensions = imageSize(refined_flow);
+	if (pixel.x >= output_dimensions.x || pixel.y >= output_dimensions.y || pixel.z >= output_dimensions.z)
+		return;
+
+	int eye = pixel.z;
+	vec2 uv = (vec2(pixel.xy) + vec2(0.5)) / vec2(output_dimensions.xy);
+	vec2 base_previous_uv;
+	if (!current_to_previous_uv(uv, eye, base_previous_uv))
+	{
+		imageStore(refined_flow, pixel, vec4(0.0));
+		return;
+	}
+
+	vec4 prediction = textureLod(coarse_flow, vec3(uv, float(eye)), 0.0);
+	vec2 predicted_current_uv = uv + prediction.xy;
+	vec2 predicted_previous_uv;
+	vec2 predicted_residual = vec2(0.0);
+	if (prediction.a > 0.0 && current_to_previous_uv(predicted_current_uv, eye, predicted_previous_uv))
+		predicted_residual = predicted_previous_uv - base_previous_uv;
+
+	float current_luma = luma(textureLod(current_image, vec3(uv, float(eye)), 0.0).rgb);
+	vec2 best_previous_uv = base_previous_uv + predicted_residual;
+	float best_cost = 1e6;
+	float radius = max(parameters.x, 1.0);
+	for (int y = -2; y <= 2; ++y)
+	{
+		for (int x = -2; x <= 2; ++x)
+		{
+			vec2 candidate = base_previous_uv + predicted_residual + vec2(x, y) * radius * input_size.zw;
+			if (!valid_uv(candidate))
+				continue;
+			float candidate_cost = matching_cost(uv, candidate, eye, current_luma);
+			if (candidate_cost < best_cost)
+			{
+				best_cost = candidate_cost;
+				best_previous_uv = candidate;
+			}
+		}
+	}
+
+	vec2 best_current_uv;
+	if (prediction.a <= 0.0 || best_cost >= 1e5 || !previous_to_current_uv(best_previous_uv, eye, best_current_uv))
+	{
+		imageStore(refined_flow, pixel, vec4(0.0));
+		return;
+	}
+	vec2 residual = best_current_uv - uv;
+	float confidence = prediction.a * clamp(1.0 - best_cost * 10.0, 0.0, 1.0);
+	imageStore(refined_flow, pixel, vec4(residual, 0.0, confidence));
+}

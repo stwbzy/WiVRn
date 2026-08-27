@@ -42,6 +42,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <magic_enum.hpp>
 
 #include "xrt/xrt_config_build.h" // IWYU pragma: keep
 #ifdef XRT_FEATURE_RENDERDOC
@@ -69,10 +70,15 @@ static auto renderdoc()
 #endif
 
 DEBUG_GET_ONCE_LOG_OPTION(log, "XRT_COMPOSITOR_LOG", U_LOGGING_INFO)
-DEBUG_GET_ONCE_BOOL_OPTION(fsr_frame_generation, "WIVRN_FSR_FRAME_GENERATION", false)
-DEBUG_GET_ONCE_BOOL_OPTION(fsr_frame_generation_handoff, "WIVRN_FSR_FRAME_GENERATION_HANDOFF", false)
-DEBUG_GET_ONCE_BOOL_OPTION(fsr_frame_generation_double_rate, "WIVRN_FSR_FRAME_GENERATION_DOUBLE_RATE", false)
-DEBUG_GET_ONCE_BOOL_OPTION(fsr_frame_generation_color_only, "WIVRN_FSR_FRAME_GENERATION_COLOR_ONLY", false)
+
+bool frame_synthesis_forced_off()
+{
+	static const bool disabled = [] {
+		const char * value = std::getenv("WIVRN_DISABLE_FRAME_SYNTHESIS");
+		return value != nullptr && *value != '\0' && std::string_view(value) != "0";
+	}();
+	return disabled;
+}
 
 int frame_generation_search_radius()
 {
@@ -88,13 +94,6 @@ int frame_generation_search_radius()
 		return static_cast<int>(std::clamp(parsed, 1L, 4L));
 	}();
 	return radius;
-}
-
-static xrt_swapchain *
-frame_synthesis_depth_swapchain(const comp_layer * layer, uint32_t view)
-{
-	assert(layer->data.type == XRT_LAYER_PROJECTION);
-	return layer->sc_array[2 * XRT_MAX_VIEWS + view];
 }
 
 namespace details
@@ -385,7 +384,8 @@ struct frame_generation_flow_push_constants
 	std::array<float, 2> current_per_motion;
 	int search_radius;
 	int sample_stride;
-	std::array<float, 2> transform_alignment_padding;
+	int hierarchy_level;
+	int alignment_padding;
 	std::array<float, 16> history_transform;
 	std::array<float, 4> current_to_tangent;
 };
@@ -560,6 +560,12 @@ vk::raii::DescriptorSetLayout make_frame_generation_flow_ds_layout(wivrn::vk_bun
 	                .descriptorCount = 1,
 	                .stageFlags = vk::ShaderStageFlagBits::eCompute,
 	        },
+	        vk::DescriptorSetLayoutBinding{
+	                .binding = 3,
+	                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+	                .descriptorCount = 1,
+	                .stageFlags = vk::ShaderStageFlagBits::eCompute,
+	        },
 	};
 	return vk::raii::DescriptorSetLayout{
 	        vk.device,
@@ -608,17 +614,17 @@ vk::raii::DescriptorPool make_frame_generation_flow_descriptor_pool(wivrn::vk_bu
 	std::array pool_sizes{
 	        vk::DescriptorPoolSize{
 	                .type = vk::DescriptorType::eCombinedImageSampler,
-	                .descriptorCount = 2 * 2,
+	                .descriptorCount = 4 * 3,
 	        },
 	        vk::DescriptorPoolSize{
 	                .type = vk::DescriptorType::eStorageImage,
-	                .descriptorCount = 2,
+	                .descriptorCount = 4,
 	        },
 	};
 	return vk::raii::DescriptorPool{
 	        vk.device,
 	        vk::DescriptorPoolCreateInfo{
-	                .maxSets = 2,
+	                .maxSets = 4,
 	                .poolSizeCount = uint32_t(pool_sizes.size()),
 	                .pPoolSizes = pool_sizes.data(),
 	        }};
@@ -701,14 +707,14 @@ void compositor::timings::add(float us)
 }
 
 compositor::frame_generation_flow::frame_generation_flow(vk_bundle & vk, vk::Extent3D extent) :
-        motion{
+        coarse_motion{
                 vk.device,
                 vk::ImageCreateInfo{
                         .imageType = vk::ImageType::e2D,
                         .format = vk::Format::eR16G16B16A16Sfloat,
                         .extent = {
-                                .width = std::max(1u, extent.width / 4),
-                                .height = std::max(1u, extent.height / 4),
+                                .width = std::max(1u, extent.width / 16),
+                                .height = std::max(1u, extent.height / 16),
                                 .depth = 1,
                         },
                         .mipLevels = 1,
@@ -717,7 +723,26 @@ compositor::frame_generation_flow::frame_generation_flow(vk_bundle & vk, vk::Ext
                         .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled,
                 },
                 VmaAllocationCreateInfo{.usage = VMA_MEMORY_USAGE_AUTO},
-                "frame-generation color-only motion"},
+                "frame-synthesis coarse optical flow"},
+        coarse_motion_views{
+                make_frame_generation_motion_view(vk, coarse_motion, 0),
+                make_frame_generation_motion_view(vk, coarse_motion, 1),
+        },
+        motion{vk.device, vk::ImageCreateInfo{
+                                  .imageType = vk::ImageType::e2D,
+                                  .format = vk::Format::eR16G16B16A16Sfloat,
+                                  .extent = {
+                                          .width = std::max(1u, extent.width / 4),
+                                          .height = std::max(1u, extent.height / 4),
+                                          .depth = 1,
+                                  },
+                                  .mipLevels = 1,
+                                  .arrayLayers = 2,
+                                  .samples = vk::SampleCountFlagBits::e1,
+                                  .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled,
+                          },
+               VmaAllocationCreateInfo{.usage = VMA_MEMORY_USAGE_AUTO},
+               "frame-synthesis refined optical flow"},
         motion_views{
                 make_frame_generation_motion_view(vk, motion, 0),
                 make_frame_generation_motion_view(vk, motion, 1),
@@ -728,7 +753,7 @@ compositor::frame_generation_flow::frame_generation_flow(vk_bundle & vk, vk::Ext
         pipeline(make_frame_generation_flow_pipeline(vk, *layout)),
         descriptor_pool(make_frame_generation_flow_descriptor_pool(vk))
 {
-	std::array layouts = {*ds_layout, *ds_layout};
+	std::array layouts = {*ds_layout, *ds_layout, *ds_layout, *ds_layout};
 	auto sets = vk.device.allocateDescriptorSets(vk::DescriptorSetAllocateInfo{
 	        .descriptorPool = descriptor_pool,
 	        .descriptorSetCount = uint32_t(descriptor_sets.size()),
@@ -736,7 +761,10 @@ compositor::frame_generation_flow::frame_generation_flow(vk_bundle & vk, vk::Ext
 	});
 	for (auto [i, set]: std::ranges::enumerate_view(sets))
 		descriptor_sets[i] = set;
-	vk.name(vk::Image(motion), "frame-generation color-only motion image");
+	vk.name(vk::Image(coarse_motion), "frame-synthesis coarse optical-flow image");
+	vk.name(vk::Image(motion), "frame-synthesis refined optical-flow image");
+	for (auto [i, view]: std::ranges::enumerate_view(coarse_motion_views))
+		vk.name(*view, std::format("frame-synthesis coarse optical-flow view {}", i));
 	for (auto [i, view]: std::ranges::enumerate_view(motion_views))
 		vk.name(*view, std::format("frame-generation color-only motion view {}", i));
 	vk.name(*pipeline, "frame-generation color-only motion pipeline");
@@ -795,112 +823,48 @@ void compositor::inspect_frame_generation_inputs()
 		return;
 
 	uint32_t projection_layers = 0;
-	uint32_t depth_layers = 0;
-	uint32_t depth_views = 0;
-	uint32_t synthesis_layers = 0;
-	uint32_t synthesis_depth_views = 0;
-	uint32_t motion_vector_views = 0;
-	uint32_t ready_views = 0;
-	uint32_t missing_auxiliary_swapchains = 0;
-	uint32_t invalid_input_views = 0;
 	uint32_t projection_view_count = 0;
 
 	for (uint32_t layer_index = 0; layer_index < layer_accum.layer_count; ++layer_index)
 	{
 		const auto & layer = layer_accum.layers[layer_index];
-		if (layer.data.type == XRT_LAYER_PROJECTION)
+		if (layer.data.type == XRT_LAYER_PROJECTION || layer.data.type == XRT_LAYER_PROJECTION_DEPTH)
 		{
 			projection_layers++;
 			projection_view_count += layer.data.view_count;
-			bool has_synthesis = false;
-			for (uint32_t view = 0; view < layer.data.view_count; ++view)
-			{
-				const auto & synthesis = layer.data.proj.v[view].frame_synthesis;
-				if (synthesis.valid)
-				{
-					has_synthesis = true;
-					motion_vector_views++;
-					if (synthesis.depth.rect.extent.w > 0 && synthesis.depth.rect.extent.h > 0)
-						synthesis_depth_views++;
-
-					const bool color_swapchain = comp_layer_get_swapchain(&layer, view) != nullptr;
-					const bool motion_swapchain = comp_layer_get_motion_vector_swapchain(&layer, view) != nullptr;
-					const bool depth_swapchain = frame_synthesis_depth_swapchain(&layer, view) != nullptr;
-					const bool valid_rects = synthesis.motion_vector.rect.extent.w > 0 &&
-					                         synthesis.motion_vector.rect.extent.h > 0 &&
-					                         synthesis.depth.rect.extent.w > 0 &&
-					                         synthesis.depth.rect.extent.h > 0;
-					const bool valid_depth_range = std::isfinite(synthesis.min_depth) &&
-					                               std::isfinite(synthesis.max_depth) &&
-					                               std::isfinite(synthesis.near_z) &&
-					                               std::isfinite(synthesis.far_z) &&
-					                               synthesis.min_depth >= 0.0f &&
-					                               synthesis.min_depth <= synthesis.max_depth &&
-					                               synthesis.max_depth <= 1.0f &&
-					                               synthesis.near_z != synthesis.far_z;
-					if (color_swapchain && motion_swapchain && depth_swapchain && valid_rects && valid_depth_range)
-						ready_views++;
-					else
-					{
-						if (!color_swapchain || !motion_swapchain || !depth_swapchain)
-							missing_auxiliary_swapchains++;
-						if (!valid_rects || !valid_depth_range)
-							invalid_input_views++;
-					}
-				}
-			}
-			if (has_synthesis)
-				synthesis_layers++;
-		}
-		else if (layer.data.type == XRT_LAYER_PROJECTION_DEPTH)
-		{
-			depth_layers++;
-			depth_views += layer.data.view_count;
 		}
 	}
 
 	frame_generation_probe.frames++;
-	const bool standard_depth_ready = depth_layers > 0 && depth_views > 0;
-	const bool metadata_inputs_ready = projection_layers == 1 && projection_view_count == 2 && synthesis_layers == 1 &&
-	                                   motion_vector_views == 2 && synthesis_depth_views == 2 && ready_views == 2;
-	const bool color_only_inputs_ready = frame_generation_probe.color_only_requested &&
-	                                     projection_layers == 1 && projection_view_count == 2 &&
-	                                     frame_history.has_value() && frame_history->valid;
-	const bool inputs_ready = metadata_inputs_ready || color_only_inputs_ready;
+	const bool server_backend = frame_generation_probe.backend == frame_synthesis_backend::server_experimental;
+	if (!server_backend)
+	{
+		// The headset owns color analysis and history in client-side SSW.  The
+		// server still counts application frames for Automatic's hysteresis, but
+		// must not squash layers or allocate/copy server history.
+		frame_generation_probe.last_inputs_ready = projection_layers >= 1 && projection_view_count >= 2;
+		return;
+	}
+	const bool inputs_ready = projection_layers >= 1 && projection_view_count >= 2 &&
+	                          frame_history.has_value() && frame_history->valid;
 	if (!frame_generation_probe.reported || frame_generation_probe.frames <= 10 ||
 	    (!inputs_ready && frame_generation_probe.frames % 600 == 0) ||
-	    inputs_ready != frame_generation_probe.last_inputs_ready ||
-	    ready_views != frame_generation_probe.last_ready_views)
+	    inputs_ready != frame_generation_probe.last_inputs_ready)
 	{
-		U_LOG_IFL_I(log_level, "FSR frame-generation compositor probe: requested=%u color_only=%u frame=%" PRIu64 " layers=%u projection_layers=%u depth_layers=%u depth_views=%u synthesis_layers=%u"
-		                       " projection_views=%u synthesis_depth_views=%u motion_vector_views=%u ready_views=%u"
-		                       " missing_auxiliary_swapchains=%u invalid_input_views=%u standard_depth_ready=%u inputs_ready=%u"
-		                       " history_enabled=%u history_valid=%u history_captures=%" PRIu64 " backend=%s backend_dispatches=%" PRIu64 " handoff=%s fallback=normal-composition-available",
+		U_LOG_IFL_I(log_level, "Server ASW: requested=%u frame=%" PRIu64 " layers=%u projection_layers=%u"
+		                       " projection_views=%u inputs_ready=%u history_valid=%u backend_dispatches=%" PRIu64 " state=%s fallback=%s",
 		            frame_generation_probe.requested,
-		            frame_generation_probe.color_only_requested,
 		            frame_generation_probe.frames,
 		            layer_accum.layer_count,
 		            projection_layers,
-		            depth_layers,
-		            depth_views,
-		            synthesis_layers,
 		            projection_view_count,
-		            synthesis_depth_views,
-		            motion_vector_views,
-		            ready_views,
-		            missing_auxiliary_swapchains,
-		            invalid_input_views,
-		            standard_depth_ready,
 		            inputs_ready,
-		            frame_generation_probe.history_enabled,
 		            frame_history.has_value() && frame_history->valid,
-		            frame_generation_probe.history_captures,
-		            frame_generation_probe.backend_enabled ? "experimental-candidate" : "none",
 		            frame_generation_probe.backend_dispatches,
-		            frame_generation_probe.double_rate_enabled ? "double-rate" : (frame_generation_probe.handoff_enabled ? "diagnostic-same-rate" : "disabled"));
+		            frame_generation_probe.double_rate_enabled ? "active" : "inactive",
+		            std::string(magic_enum::enum_name(frame_generation_probe.fallback_reason)).c_str());
 		frame_generation_probe.reported = true;
 		frame_generation_probe.last_inputs_ready = inputs_ready;
-		frame_generation_probe.last_ready_views = ready_views;
 	}
 }
 
@@ -914,103 +878,117 @@ bool compositor::dispatch_frame_generation_motion(vk::raii::CommandBuffer & comm
 
 	auto & flow = *frame_generation_flow_backend;
 	const auto current_extent = frame_history->image.info().extent;
+	const auto coarse_extent = flow.coarse_motion.info().extent;
 	const auto motion_extent = flow.motion.info().extent;
-	const vk::ImageMemoryBarrier2 motion_to_compute{
-	        .srcStageMask = flow.output_valid ? vk::PipelineStageFlagBits2::eComputeShader
-	                                          : vk::PipelineStageFlagBits2::eNone,
-	        .srcAccessMask = flow.output_valid ? vk::AccessFlagBits2::eShaderSampledRead
-	                                           : vk::AccessFlagBits2::eNone,
+	std::array motion_to_compute{
+	        vk::ImageMemoryBarrier2{
+	                .srcStageMask = flow.output_valid ? vk::PipelineStageFlagBits2::eComputeShader
+	                                                  : vk::PipelineStageFlagBits2::eNone,
+	                .srcAccessMask = flow.output_valid ? vk::AccessFlagBits2::eShaderSampledRead
+	                                                   : vk::AccessFlagBits2::eNone,
+	                .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+	                .dstAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
+	                .oldLayout = flow.output_valid ? vk::ImageLayout::eShaderReadOnlyOptimal
+	                                               : vk::ImageLayout::eUndefined,
+	                .newLayout = vk::ImageLayout::eGeneral,
+	                .image = flow.coarse_motion,
+	                .subresourceRange = {
+	                        .aspectMask = vk::ImageAspectFlagBits::eColor,
+	                        .levelCount = 1,
+	                        .layerCount = 2,
+	                },
+	        },
+	        vk::ImageMemoryBarrier2{
+	                .srcStageMask = flow.output_valid ? vk::PipelineStageFlagBits2::eComputeShader : vk::PipelineStageFlagBits2::eNone,
+	                .srcAccessMask = flow.output_valid ? vk::AccessFlagBits2::eShaderSampledRead : vk::AccessFlagBits2::eNone,
+	                .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+	                .dstAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
+	                .oldLayout = flow.output_valid ? vk::ImageLayout::eShaderReadOnlyOptimal : vk::ImageLayout::eUndefined,
+	                .newLayout = vk::ImageLayout::eGeneral,
+	                .image = flow.motion,
+	                .subresourceRange = {
+	                        .aspectMask = vk::ImageAspectFlagBits::eColor,
+	                        .levelCount = 1,
+	                        .layerCount = 2,
+	                },
+	        },
+	};
+	command.pipelineBarrier2({
+	        .imageMemoryBarrierCount = uint32_t(motion_to_compute.size()),
+	        .pImageMemoryBarriers = motion_to_compute.data(),
+	});
+
+	command.bindPipeline(vk::PipelineBindPoint::eCompute, *flow.pipeline);
+	auto dispatch_level = [&](bool refine) {
+		const auto output_extent = refine ? motion_extent : coarse_extent;
+		for (uint32_t view = 0; view < 2; ++view)
+		{
+			const auto descriptor_index = (refine ? 2u : 0u) + view;
+			const auto reprojection = make_frame_generation_reprojection(previous_view_poses[view],
+			                                                             previous_view_fovs[view],
+			                                                             current_poses[view],
+			                                                             current_fovs[view]);
+			std::array inputs{
+			        vk::DescriptorImageInfo{
+			                .sampler = *flow.sampler,
+			                .imageView = current_views[view],
+			                .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+			        },
+			        vk::DescriptorImageInfo{
+			                .sampler = *flow.sampler,
+			                .imageView = *frame_history->views[view],
+			                .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+			        },
+			        vk::DescriptorImageInfo{
+			                .imageView = refine ? *flow.motion_views[view] : *flow.coarse_motion_views[view],
+			                .imageLayout = vk::ImageLayout::eGeneral,
+			        },
+			        vk::DescriptorImageInfo{
+			                .sampler = *flow.sampler,
+			                .imageView = refine ? *flow.coarse_motion_views[view] : current_views[view],
+			                .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+			        },
+			};
+			std::array writes{
+			        vk::WriteDescriptorSet{.dstSet = flow.descriptor_sets[descriptor_index], .dstBinding = 0, .descriptorCount = 1, .descriptorType = vk::DescriptorType::eCombinedImageSampler, .pImageInfo = &inputs[0]},
+			        vk::WriteDescriptorSet{.dstSet = flow.descriptor_sets[descriptor_index], .dstBinding = 1, .descriptorCount = 1, .descriptorType = vk::DescriptorType::eCombinedImageSampler, .pImageInfo = &inputs[1]},
+			        vk::WriteDescriptorSet{.dstSet = flow.descriptor_sets[descriptor_index], .dstBinding = 2, .descriptorCount = 1, .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &inputs[2]},
+			        vk::WriteDescriptorSet{.dstSet = flow.descriptor_sets[descriptor_index], .dstBinding = 3, .descriptorCount = 1, .descriptorType = vk::DescriptorType::eCombinedImageSampler, .pImageInfo = &inputs[3]},
+			};
+			vk.device.updateDescriptorSets(writes, {});
+
+			const frame_generation_flow_push_constants constants{
+			        .inv_current_size = {1.0f / float(current_extent.width), 1.0f / float(current_extent.height)},
+			        .current_per_motion = {float(current_extent.width) / float(output_extent.width), float(current_extent.height) / float(output_extent.height)},
+			        .search_radius = refine ? 2 : frame_generation_search_radius(),
+			        .sample_stride = refine ? 4 : 16,
+			        .hierarchy_level = refine ? 1 : 0,
+			        .history_transform = reprojection.transform,
+			        .current_to_tangent = reprojection.target_to_tangent,
+			};
+			command.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *flow.layout, 0, flow.descriptor_sets[descriptor_index], {});
+			command.pushConstants(*flow.layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
+			command.dispatch((output_extent.width + 15) / 16, (output_extent.height + 15) / 16, 1);
+		}
+	};
+	dispatch_level(false);
+
+	const vk::ImageMemoryBarrier2 coarse_to_sample{
+	        .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+	        .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
 	        .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
-	        .dstAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
-	        .oldLayout = flow.output_valid ? vk::ImageLayout::eShaderReadOnlyOptimal
-	                                       : vk::ImageLayout::eUndefined,
-	        .newLayout = vk::ImageLayout::eGeneral,
-	        .image = flow.motion,
+	        .dstAccessMask = vk::AccessFlagBits2::eShaderSampledRead,
+	        .oldLayout = vk::ImageLayout::eGeneral,
+	        .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+	        .image = flow.coarse_motion,
 	        .subresourceRange = {
 	                .aspectMask = vk::ImageAspectFlagBits::eColor,
 	                .levelCount = 1,
 	                .layerCount = 2,
 	        },
 	};
-	command.pipelineBarrier2({
-	        .imageMemoryBarrierCount = 1,
-	        .pImageMemoryBarriers = &motion_to_compute,
-	});
-
-	command.bindPipeline(vk::PipelineBindPoint::eCompute, *flow.pipeline);
-	for (uint32_t view = 0; view < 2; ++view)
-	{
-		const auto reprojection = make_frame_generation_reprojection(previous_view_poses[view],
-		                                                             previous_view_fovs[view],
-		                                                             current_poses[view],
-		                                                             current_fovs[view]);
-		std::array inputs{
-		        vk::DescriptorImageInfo{
-		                .sampler = *flow.sampler,
-		                .imageView = current_views[view],
-		                .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
-		        },
-		        vk::DescriptorImageInfo{
-		                .sampler = *flow.sampler,
-		                .imageView = *frame_history->views[view],
-		                .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
-		        },
-		        vk::DescriptorImageInfo{
-		                .imageView = *flow.motion_views[view],
-		                .imageLayout = vk::ImageLayout::eGeneral,
-		        },
-		};
-		std::array writes{
-		        vk::WriteDescriptorSet{
-		                .dstSet = flow.descriptor_sets[view],
-		                .dstBinding = 0,
-		                .descriptorCount = 1,
-		                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
-		                .pImageInfo = &inputs[0],
-		        },
-		        vk::WriteDescriptorSet{
-		                .dstSet = flow.descriptor_sets[view],
-		                .dstBinding = 1,
-		                .descriptorCount = 1,
-		                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
-		                .pImageInfo = &inputs[1],
-		        },
-		        vk::WriteDescriptorSet{
-		                .dstSet = flow.descriptor_sets[view],
-		                .dstBinding = 2,
-		                .descriptorCount = 1,
-		                .descriptorType = vk::DescriptorType::eStorageImage,
-		                .pImageInfo = &inputs[2],
-		        },
-		};
-		vk.device.updateDescriptorSets(writes, {});
-
-		const frame_generation_flow_push_constants constants{
-		        .inv_current_size = {
-		                1.0f / float(current_extent.width),
-		                1.0f / float(current_extent.height),
-		        },
-		        .current_per_motion = {
-		                float(current_extent.width) / float(motion_extent.width),
-		                float(current_extent.height) / float(motion_extent.height),
-		        },
-		        .search_radius = frame_generation_search_radius(),
-		        .sample_stride = 4,
-		        .history_transform = reprojection.transform,
-		        .current_to_tangent = reprojection.target_to_tangent,
-		};
-		command.bindDescriptorSets(vk::PipelineBindPoint::eCompute,
-		                           *flow.layout,
-		                           0,
-		                           flow.descriptor_sets[view],
-		                           {});
-		command.pushConstants(*flow.layout,
-		                      vk::ShaderStageFlagBits::eCompute,
-		                      0,
-		                      sizeof(constants),
-		                      &constants);
-		command.dispatch((motion_extent.width + 15) / 16, (motion_extent.height + 15) / 16, 1);
-	}
+	command.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &coarse_to_sample});
+	dispatch_level(true);
 
 	const vk::ImageMemoryBarrier2 motion_to_sample{
 	        .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
@@ -1020,16 +998,9 @@ bool compositor::dispatch_frame_generation_motion(vk::raii::CommandBuffer & comm
 	        .oldLayout = vk::ImageLayout::eGeneral,
 	        .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
 	        .image = flow.motion,
-	        .subresourceRange = {
-	                .aspectMask = vk::ImageAspectFlagBits::eColor,
-	                .levelCount = 1,
-	                .layerCount = 2,
-	        },
+	        .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor, .levelCount = 1, .layerCount = 2},
 	};
-	command.pipelineBarrier2({
-	        .imageMemoryBarrierCount = 1,
-	        .pImageMemoryBarriers = &motion_to_sample,
-	});
+	command.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &motion_to_sample});
 	flow.output_valid = true;
 	return true;
 }
@@ -1044,83 +1015,23 @@ bool compositor::dispatch_frame_generation_candidate(vk::raii::CommandBuffer & c
 	if (!frame_generation_probe.backend_enabled || !frame_generation || !frame_history || !frame_history->valid)
 		return false;
 
-	const comp_layer * synthesis_layer = nullptr;
-	bool color_only = false;
-	for (uint32_t layer_index = 0; layer_index < layer_accum.layer_count; ++layer_index)
-	{
-		const auto & layer = layer_accum.layers[layer_index];
-		if (layer.data.type != XRT_LAYER_PROJECTION || layer.data.view_count != 2)
-			continue;
-
-		bool ready = true;
-		for (uint32_t view = 0; view < 2; ++view)
-		{
-			const auto & synthesis = layer.data.proj.v[view].frame_synthesis;
-			ready = ready && synthesis.valid &&
-			        comp_layer_get_motion_vector_swapchain(&layer, view) != nullptr &&
-			        frame_synthesis_depth_swapchain(&layer, view) != nullptr &&
-			        synthesis.motion_vector.rect.extent.w > 0 &&
-			        synthesis.motion_vector.rect.extent.h > 0 &&
-			        synthesis.depth.rect.extent.w > 0 &&
-			        synthesis.depth.rect.extent.h > 0;
-		}
-		if (ready)
-		{
-			synthesis_layer = &layer;
-			break;
-		}
-	}
-	if (synthesis_layer == nullptr && frame_generation_probe.color_only_requested)
-	{
-		if (!frame_generation_flow_backend)
-			return false;
-		for (uint32_t layer_index = 0; layer_index < layer_accum.layer_count; ++layer_index)
-		{
-			const auto & layer = layer_accum.layers[layer_index];
-			if (layer.data.type == XRT_LAYER_PROJECTION && layer.data.view_count == 2)
-			{
-				color_only = true;
-				break;
-			}
-		}
-	}
-	if (synthesis_layer == nullptr && !color_only)
+	if (!frame_generation_flow_backend)
 		return false;
-
-	auto get_auxiliary_view = [&](uint32_t view, bool motion) -> vk::ImageView {
-		if (color_only)
-			return motion ? *frame_generation_flow_backend->motion_views[view] : *frame_history->views[view];
-		const auto & synthesis = synthesis_layer->data.proj.v[view].frame_synthesis;
-		const auto & sub = motion ? synthesis.motion_vector : synthesis.depth;
-		xrt_swapchain * xsc = motion ? comp_layer_get_motion_vector_swapchain(synthesis_layer, view)
-		                             : frame_synthesis_depth_swapchain(synthesis_layer, view);
-		if (xsc == nullptr)
-			return nullptr;
-		auto * swapchain = comp_swapchain(xsc);
-		if (sub.image_index >= XRT_MAX_SWAPCHAIN_IMAGES)
-			return nullptr;
-		const auto & image = swapchain->images[sub.image_index];
-		if (sub.array_index >= image.array_size)
-			return nullptr;
-		return get_image_view(&image, synthesis_layer->data.flags, sub.array_index);
-	};
 
 	const auto extent = frame_generation->output.info().extent;
 	const std::array<float, 2> inv_size{
 	        1.0f / float(extent.width),
 	        1.0f / float(extent.height),
 	};
-	std::array<vk::ImageView, 2> motion_views;
-	std::array<vk::ImageView, 2> depth_views;
-	if (color_only && !dispatch_frame_generation_motion(command, current_views, current_poses, current_fovs))
+	const auto real_frame_delta = frame.rendering.predicted_display_time_ns - previous_display_time_ns;
+	const float synthesis_factor = real_frame_delta > 0
+	                                       ? std::clamp(float(U_TIME_1S_IN_NS / frame_rate.load()) /
+	                                                            float(real_frame_delta),
+	                                                    0.0f,
+	                                                    1.0f)
+	                                       : 0.5f;
+	if (!dispatch_frame_generation_motion(command, current_views, current_poses, current_fovs))
 		return false;
-	for (uint32_t view = 0; view < 2; ++view)
-	{
-		motion_views[view] = get_auxiliary_view(view, true);
-		depth_views[view] = get_auxiliary_view(view, false);
-		if (!motion_views[view] || !depth_views[view])
-			return false;
-	}
 
 	const vk::ImageMemoryBarrier2 output_to_compute{
 	        .srcStageMask = frame_generation->output_valid ? vk::PipelineStageFlagBits2::eComputeShader
@@ -1147,28 +1058,25 @@ bool compositor::dispatch_frame_generation_candidate(vk::raii::CommandBuffer & c
 	command.bindPipeline(vk::PipelineBindPoint::eCompute, *frame_generation->pipeline);
 	for (uint32_t view = 0; view < 2; ++view)
 	{
-		const auto * synthesis = synthesis_layer != nullptr ? &synthesis_layer->data.proj.v[view].frame_synthesis : nullptr;
-		const auto reprojection = color_only
-		                                  ? make_frame_generation_reprojection(previous_view_poses[view],
-		                                                                       previous_view_fovs[view],
-		                                                                       candidate_poses[view],
-		                                                                       candidate_fovs[view])
-		                                  : frame_generation_reprojection{};
+		const auto reprojection = make_frame_generation_reprojection(current_poses[view],
+		                                                             current_fovs[view],
+		                                                             candidate_poses[view],
+		                                                             candidate_fovs[view]);
 
 		std::array inputs{
 		        vk::DescriptorImageInfo{
 		                .sampler = *frame_generation->sampler,
-		                .imageView = *frame_history->views[view],
+		                .imageView = current_views[view],
 		                .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
 		        },
 		        vk::DescriptorImageInfo{
 		                .sampler = *frame_generation->sampler,
-		                .imageView = motion_views[view],
+		                .imageView = *frame_generation_flow_backend->motion_views[view],
 		                .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
 		        },
 		        vk::DescriptorImageInfo{
 		                .sampler = *frame_generation->sampler,
-		                .imageView = depth_views[view],
+		                .imageView = *frame_generation_flow_backend->motion_views[view],
 		                .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
 		        },
 		};
@@ -1210,16 +1118,12 @@ bool compositor::dispatch_frame_generation_candidate(vk::raii::CommandBuffer & c
 
 		const frame_generation_push_constants constants{
 		        .inv_size = inv_size,
-		        .synthesis_factor = 0.5f,
-		        .min_depth = synthesis != nullptr ? synthesis->min_depth : 0.0f,
-		        .max_depth = synthesis != nullptr ? synthesis->max_depth : 1.0f,
-		        .pose_reprojection = color_only ? 1.0f : 0.0f,
-		        .motion_scale = synthesis != nullptr
-		                                ? std::array<float, 2>{synthesis->motion_vector_scale[0], synthesis->motion_vector_scale[1]}
-		                                : std::array<float, 2>{-1.0f, -1.0f},
-		        .motion_offset = synthesis != nullptr
-		                                 ? std::array<float, 2>{synthesis->motion_vector_offset[0], synthesis->motion_vector_offset[1]}
-		                                 : std::array<float, 2>{0.0f, 0.0f},
+		        .synthesis_factor = synthesis_factor,
+		        .min_depth = 0.0f,
+		        .max_depth = 1.0f,
+		        .pose_reprojection = 1.0f,
+		        .motion_scale = {-1.0f, -1.0f},
+		        .motion_offset = {0.0f, 0.0f},
 		        .history_transform = reprojection.transform,
 		        .target_to_tangent = reprojection.target_to_tangent,
 		};
@@ -1257,16 +1161,17 @@ bool compositor::dispatch_frame_generation_candidate(vk::raii::CommandBuffer & c
 	frame_generation->output_valid = true;
 	if (frame_generation_probe.backend_dispatches++ == 0)
 		U_LOG_IFL_I(log_level,
-		            "FSR frame-generation candidate dispatched: mode=%s views=2 extent=%ux%u factor=0.50 candidate=complete",
-		            color_only ? "pose-compensated-color-only" : "metadata",
+		            "Server ASW candidate dispatched: hierarchical-flow views=2 extent=%ux%u extrapolation=%.2f",
 		            extent.width,
-		            extent.height);
+		            extent.height,
+		            synthesis_factor);
 	return true;
 }
 
 void compositor::capture_frame_generation_history(vk::raii::CommandBuffer & command)
 {
-	if (!frame_history)
+	if (!frame_history || frame_generation_probe.backend != frame_synthesis_backend::server_experimental ||
+	    !frame_generation_probe.requested)
 		return;
 
 	const auto extent = frame_history->image.info().extent;
@@ -1410,35 +1315,35 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	const int64_t current_display_time_ns = frame.rendering.predicted_display_time_ns;
 	const auto current_display_time = session.get_offset().to_headset(current_display_time_ns);
 	auto & view_info = images[i].view_info;
-	if (frame_generation_probe.double_rate_enabled)
-	{
-		// Reserve the even ID for the interval candidate and the odd ID for
-		// the application frame tracked by pacer. Deriving both IDs from the
-		// OpenXR frame ID keeps feedback correlated across pause/resume.
-		images[i].frame_index = uint64_t(frame.rendering.id) * 2 + 1;
-	}
-	else
-		images[i].frame_index = frame.rendering.id;
+	auto assign_stream_frame = [&](image & output, bool application_frame) {
+		const uint64_t stream_frame_index = next_stream_frame_index++;
+		output.frame_index = stream_frame_index;
+		stream_frame_mappings[stream_frame_index % stream_frame_mappings.size()] = {
+		        .stream_frame_index = stream_frame_index,
+		        .application_frame_id = frame.rendering.id,
+		        .application_frame = application_frame,
+		};
+	};
+	assign_stream_frame(images[i], true);
 	view_info = {
 	        .display_time = current_display_time,
 	        .alpha = alpha,
+	        .synthetic = false,
 	};
 	auto * generated_view_info = generated_i >= 0 ? &images[generated_i].view_info : nullptr;
 	if (generated_view_info)
 	{
-		images[generated_i].frame_index = uint64_t(frame.rendering.id) * 2;
+		assign_stream_frame(images[generated_i], false);
 		*generated_view_info = view_info;
-		generated_view_info->display_time = previous_display_time_ns > 0
-		                                            ? session.get_offset().to_headset(
-		                                                      previous_display_time_ns + (current_display_time_ns - previous_display_time_ns) / 2)
-		                                            : current_display_time;
+		generated_view_info->display_time = session.get_offset().to_headset(
+		        current_display_time_ns + int64_t(U_TIME_1S_IN_NS / frame_rate.load()));
 	}
 	session.dump_time("begin", frame.rendering.id, os_monotonic_get_ns());
 
 	cmd_pool.reset();
 	cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
 
-	cmd.resetQueryPool(*query_pool, 0, 3);
+	cmd.resetQueryPool(*query_pool, 0, 4);
 	cmd.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, *query_pool, 0);
 
 	bool flip_y = false;
@@ -1449,7 +1354,9 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	beman::inplace_vector::inplace_vector<vk::ImageMemoryBarrier2, 6> image_barriers;
 
 	// Check if we can pass a layer directly to foveation
-	if (!frame_generation_probe.requested and !spatial_upscaler and layer_accum.layer_count == 1 and
+	const bool server_synthesis_requested = frame_generation_probe.requested &&
+	                                        frame_generation_probe.backend == frame_synthesis_backend::server_experimental;
+	if (!server_synthesis_requested and !spatial_upscaler and layer_accum.layer_count == 1 and
 	    (layer_accum.layers[0].data.type == XRT_LAYER_PROJECTION or
 	     layer_accum.layers[0].data.type == XRT_LAYER_PROJECTION_DEPTH))
 	{
@@ -1514,8 +1421,13 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	const auto candidate_fovs = application_fovs;
 	if (have_previous_pose)
 	{
+		const float prediction_factor = 1.0f + std::clamp(
+		                                               float(U_TIME_1S_IN_NS / frame_rate.load()) /
+		                                                       float(current_display_time_ns - previous_display_time_ns),
+		                                               0.0f,
+		                                               1.0f);
 		for (uint32_t view = 0; view < 2; ++view)
-			candidate_poses[view] = interpolate_pose(previous_view_poses[view], application_poses[view], 0.5f);
+			candidate_poses[view] = interpolate_pose(previous_view_poses[view], application_poses[view], prediction_factor);
 	}
 	if (generated_view_info)
 	{
@@ -1571,7 +1483,7 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	// complete candidate -> YCbCr -> encoder path. The default path continues
 	// to encode the normal composition even when the candidate is available.
 	bool candidate_dispatched = false;
-	if (frame_generation_probe.last_inputs_ready)
+	if (frame_generation_probe.double_rate_enabled && frame_generation_probe.last_inputs_ready)
 	{
 		try
 		{
@@ -1587,6 +1499,7 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 			            e.what());
 		}
 	}
+	cmd.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *query_pool, 2);
 
 	auto foveation_src = src;
 	if (candidate_dispatched && frame_generation_probe.handoff_enabled)
@@ -1609,6 +1522,7 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	}
 	if (generated_view_info)
 	{
+		generated_view_info->synthetic = candidate_dispatched;
 		if (!candidate_dispatched)
 		{
 			// The fallback slot contains the current application image rather
@@ -1618,9 +1532,9 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 		}
 		const bool generated_source_is_linear = candidate_dispatched;
 		auto generated_src = candidate_dispatched ? std::array<vk::ImageView, 2>{
-		                                                          *frame_generation->output_views[0],
-		                                                          *frame_generation->output_views[1]}
-		                                                : (spatial_upscaler ? squasher.get_unorm_views() : src);
+		                                                    *frame_generation->output_views[0],
+		                                                    *frame_generation->output_views[1]}
+		                                          : (spatial_upscaler ? squasher.get_unorm_views() : src);
 		auto generated_rect = src_rect;
 		if (spatial_upscaler)
 		{
@@ -1735,7 +1649,7 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	        .imageMemoryBarrierCount = uint32_t(image_barriers.size()),
 	        .pImageMemoryBarriers = image_barriers.data(),
 	});
-	cmd.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *query_pool, 2);
+	cmd.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *query_pool, 3);
 
 	cmd.end();
 
@@ -1764,8 +1678,6 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	// double-rate transport acquired a second image.  Do not put that
 	// sentinel in the slot consumed by the single-output loop.
 	std::array<int, 2> output_indices{i, generated_i};
-	if (generated_i >= 0)
-		output_indices = {generated_i, i};
 	const size_t output_count = generated_i >= 0 ? 2 : 1;
 	for (size_t output = 0; output < output_count; ++output)
 	{
@@ -1787,15 +1699,19 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 			encode_requests.push_back(output_indices[output]);
 	}
 	encode_cv.notify_all();
+	frame_generation_probe.real_frames++;
+	if (generated_view_info && generated_view_info->synthetic)
+		frame_generation_probe.synthetic_frames++;
 	if (generated_i >= 0 && frame_generation_probe.double_rate_pairs++ < 3)
 	{
 		U_LOG_IFL_I(log_level,
-		            "FSR double-rate pair submitted: candidate_frame=%" PRIu64 " application_frame=%" PRIu64
-		            " candidate_display=%" PRIi64 " application_display=%" PRIi64,
-		            images[generated_i].frame_index,
+		            "Server ASW pair submitted: real_frame=%" PRIu64 " interval_frame=%" PRIu64
+		            " real_display=%" PRIi64 " interval_display=%" PRIi64 " synthetic=%u",
 		            images[i].frame_index,
+		            images[generated_i].frame_index,
+		            view_info.display_time,
 		            generated_view_info->display_time,
-		            view_info.display_time);
+		            generated_view_info->synthetic);
 	}
 
 #ifdef XRT_FEATURE_RENDERDOC
@@ -1818,8 +1734,8 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	{
 		auto [res, ts] = query_pool.getResults<uint64_t>(
 		        0,
-		        3,
-		        3 * sizeof(uint64_t),
+		        4,
+		        4 * sizeof(uint64_t),
 		        sizeof(uint64_t),
 		        vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWait);
 
@@ -1827,7 +1743,9 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 		{
 			static const auto period = vk.physical_device.getProperties().limits.timestampPeriod;
 			squasher_times.add((ts[1] - ts[0]) * period / 1e3);
-			foveation_times.add((ts[2] - ts[1]) * period / 1e3);
+			const float flow_ms = float((ts[2] - ts[1]) * period / 1e6);
+			foveation_times.add((ts[3] - ts[2]) * period / 1e3);
+			update_frame_synthesis_policy(flow_ms);
 		}
 	}
 
@@ -1841,7 +1759,7 @@ xrt_result_t compositor::get_display_refresh_rate(float * hz)
 {
 	auto settings = session.get_settings();
 	// there should not be rounding errors, hz must be one of the available refresh rates
-	*hz = frame_rate * settings->fps_divider;
+	*hz = frame_rate;
 	assert(std::ranges::contains(session.get_info().available_refresh_rates, *hz));
 	return XRT_SUCCESS;
 }
@@ -1968,7 +1886,10 @@ void compositor::send_video_stream_description()
 	        // Double-rate generation halves the application cadence and fills
 	        // the interval candidate, so the transport still matches the
 	        // headset refresh rate instead of advertising an unusable 180 Hz.
-	        .frame_rate = frame_rate.load(),
+	        .frame_rate = frame_generation_probe.double_rate_enabled
+	                              ? frame_rate.load()
+	                              : (frame_generation_probe.half_rate_enabled ? frame_rate.load() * 0.5f
+	                                                                          : frame_rate.load()),
 	};
 	get_display_refresh_rate(&desc.refresh_rate);
 	static_assert(std::tuple_size_v<decltype(settings)> == std::tuple_size_v<decltype(desc.codec)>);
@@ -2003,7 +1924,7 @@ compositor::compositor(wivrn_session & session) :
                             }),
         query_pool(vk.device, vk::QueryPoolCreateInfo{
                                       .queryType = vk::QueryType::eTimestamp,
-                                      .queryCount = 3,
+                                      .queryCount = 4,
                               }),
         settings(get_encoder_settings(vk, session)),
         images{make_images(vk, cmd_pool, settings)},
@@ -2011,11 +1932,24 @@ compositor::compositor(wivrn_session & session) :
         sem{make_semaphore(vk)},
         frame_rate(settings[0].fps),
         pacer(U_TIME_1S_IN_NS / frame_rate),
-		squasher(vk, render_extent(session.get_info())),
-		foveation(vk, images[0].image.info().extent)
+        squasher(vk, render_extent(session.get_info())),
+        scaling_selection(select_upscaling(session.get_info())),
+        foveation(vk, images[0].image.info().extent)
 {
 	const auto input_extent = render_extent(session.get_info());
 	const auto upscale_extent = fsr_output_extent(session.get_info());
+	const auto & headset = session.get_info();
+	U_LOG_IFL_I(log_level,
+	            "Upscaling policy: requested=%s effective=%s render=%ux%u target=%ux%u native=%ux%u fallback=%s",
+	            std::string(magic_enum::enum_name(scaling_selection.requested)).c_str(),
+	            std::string(magic_enum::enum_name(scaling_selection.effective)).c_str(),
+	            input_extent.width,
+	            input_extent.height,
+	            headset.target_eye_width,
+	            headset.target_eye_height,
+	            headset.native_eye_width,
+	            headset.native_eye_height,
+	            std::string(magic_enum::enum_name(scaling_selection.fallback_reason)).c_str());
 	if (upscale_extent.width != input_extent.width || upscale_extent.height != input_extent.height)
 	{
 		try
@@ -2032,72 +1966,48 @@ compositor::compositor(wivrn_session & session) :
 		catch (const std::exception & e)
 		{
 			spatial_upscaler.reset();
-			U_LOG_IFL_W(log_level, "FSR 1 spatial upscaling initialization failed: %s; using native compositor path", e.what());
+			scaling_selection.effective = session.get_info().meta_compositor_available
+			                                      ? upscaling_mode::meta_compositor
+			                                      : upscaling_mode::bilinear;
+			scaling_selection.fallback_reason = runtime_fallback_reason::unsupported;
+			U_LOG_IFL_W(log_level,
+			            "FSR 1 spatial upscaling initialization failed: %s; effective fallback=%s",
+			            e.what(),
+			            std::string(magic_enum::enum_name(scaling_selection.effective)).c_str());
 		}
 	}
-	else if (fsr_upscaling_requested())
+	else if (scaling_selection.requested == upscaling_mode::fsr1)
 	{
 		U_LOG_IFL_W(log_level,
-		            "FSR 1 spatial upscaling requested but inactive: render=%ux%u native=%ux%u (choose a lower headset render resolution; EASU supports at most 4x output area)",
+		            "FSR 1 spatial upscaling requested but inactive: render=%ux%u target=%ux%u reason=%s",
 		            input_extent.width,
 		            input_extent.height,
-		            session.get_info().native_eye_width,
-		            session.get_info().native_eye_height);
+		            session.get_info().target_eye_width,
+		            session.get_info().target_eye_height,
+		            std::string(magic_enum::enum_name(scaling_selection.fallback_reason)).c_str());
 	}
 
-	const char * frame_generation_env = std::getenv("WIVRN_FSR_FRAME_GENERATION");
-	const bool frame_generation_requested = debug_get_bool_option_fsr_frame_generation();
-	if (frame_generation_requested && !fsr_frame_generation_enabled())
+	const auto requested_frame_synthesis = session.get_info().settings.frame_synthesis;
+	// The session has already negotiated the backend before constructing the
+	// compositor.  Reading the effective value here avoids a transient server
+	// fallback for Auto/unsupported headset capabilities and keeps construction
+	// consistent with runtime settings changes.
+	frame_generation_probe.backend = session.get_frame_synthesis_backend();
+	frame_generation_probe.mode = frame_synthesis_forced_off()
+	                                      ? frame_synthesis_mode::off
+	                                      : requested_frame_synthesis;
+	if (frame_synthesis_forced_off() && requested_frame_synthesis != frame_synthesis_mode::off)
 		U_LOG_IFL_W(log_level,
-		            "FSR frame generation is disabled in this build; ignoring WIVRN_FSR_FRAME_GENERATION=%s",
-		            frame_generation_env != nullptr ? frame_generation_env : "<unset>");
-	if (fsr_frame_generation_enabled() && frame_generation_requested)
+		            "Ignoring initial frame synthesis mode %s because WIVRN_DISABLE_FRAME_SYNTHESIS is set",
+		            std::string(magic_enum::enum_name(requested_frame_synthesis)).c_str());
+	frame_generation_probe.requested = frame_generation_probe.mode != frame_synthesis_mode::off &&
+	                                   frame_generation_probe.backend != frame_synthesis_backend::auto_select;
+	if (frame_generation_probe.requested &&
+	    frame_generation_probe.backend == frame_synthesis_backend::server_experimental &&
+	    !initialize_frame_synthesis_backend())
 	{
-		frame_generation_probe.requested = true;
-		frame_generation_probe.handoff_requested = debug_get_bool_option_fsr_frame_generation_handoff();
-		frame_generation_probe.double_rate_requested = debug_get_bool_option_fsr_frame_generation_double_rate();
-		frame_generation_probe.color_only_requested = debug_get_bool_option_fsr_frame_generation_color_only();
-		try
-		{
-			const auto extent = render_extent(session.get_info());
-			frame_history.emplace(vk, extent);
-			frame_generation.emplace(vk, extent);
-			if (frame_generation_probe.color_only_requested)
-			{
-				try
-				{
-					frame_generation_flow_backend.emplace(vk, extent);
-				}
-				catch (const std::exception & e)
-				{
-					frame_generation_probe.color_only_requested = false;
-					U_LOG_IFL_W(log_level, "FSR color-only motion backend initialization failed: %s; metadata path remains enabled", e.what());
-				}
-			}
-			frame_generation_probe.history_enabled = true;
-			frame_generation_probe.backend_enabled = true;
-			frame_generation_probe.handoff_enabled = frame_generation_probe.handoff_requested ||
-			                                         frame_generation_probe.double_rate_requested;
-			frame_generation_probe.double_rate_enabled = frame_generation_probe.double_rate_requested;
-			pacer.set_stream_frame_multiplier(frame_generation_probe.double_rate_enabled ? 2 : 1);
-			U_LOG_IFL_I(log_level, "FSR frame-generation compositor probe enabled: persistent color history views=2 extent=%ux%u, %s", extent.width, extent.height, frame_generation_probe.double_rate_enabled ? (frame_generation_probe.color_only_requested ? "double-rate candidate handoff requested; color-only fallback enabled" : "double-rate candidate handoff requested") : (frame_generation_probe.color_only_requested ? "color-only candidate fallback requested" : (frame_generation_probe.handoff_enabled ? "candidate handoff requested" : "normal composition retained")));
-			if (frame_generation_probe.color_only_requested)
-				U_LOG_IFL_I(log_level,
-				            "FSR color-only optical-flow search radius: %d (override with WIVRN_FSR_FRAME_GENERATION_SEARCH_RADIUS)",
-				            frame_generation_search_radius());
-		}
-		catch (const std::exception & e)
-		{
-			frame_generation.reset();
-			frame_history.reset();
-			frame_generation_probe.backend_enabled = false;
-			frame_generation_probe.handoff_enabled = false;
-			frame_generation_probe.double_rate_enabled = false;
-			frame_generation_probe.color_only_requested = false;
-			frame_generation_flow_backend.reset();
-			pacer.set_stream_frame_multiplier(1);
-			U_LOG_IFL_W(log_level, "FSR frame-generation backend initialization failed: %s; falling back to normal composition", e.what());
-		}
+		frame_generation_probe.session_disabled = true;
+		frame_generation_probe.fallback_reason = runtime_fallback_reason::unsupported;
 	}
 
 	comp_base * c_base = this;
@@ -2153,16 +2063,8 @@ compositor::compositor(wivrn_session & session) :
 	print_encoders(settings);
 	for (auto [i, settings]: std::ranges::enumerate_view(settings))
 		encoders[i] = video_encoder::create(vk, settings, i);
-	if (frame_generation_probe.double_rate_enabled)
-	{
-		pacer.set_frame_duration(uint64_t(2.0 * double(U_TIME_1S_IN_NS) / frame_rate.load()));
-		for (auto & encoder: encoders)
-			encoder->set_framerate(frame_rate);
-		U_LOG_IFL_I(log_level,
-		            "FSR frame-generation double-rate transport enabled: application rate %.0fHz, stream rate %.0fHz",
-		            frame_rate.load() * 0.5f,
-		            frame_rate.load());
-	}
+	set_frame_synthesis_active(frame_generation_probe.mode == frame_synthesis_mode::always &&
+	                           !frame_generation_probe.session_disabled);
 	send_video_stream_description();
 
 	u_var_add_root(this, "Compositor", false);
@@ -2217,15 +2119,344 @@ void compositor::set_bitrate(uint32_t bitrate)
 		encoder->set_bitrate(bitrate);
 }
 
+bool compositor::initialize_frame_synthesis_backend()
+{
+	if (frame_history && frame_generation && frame_generation_flow_backend)
+	{
+		// A previous runtime failure may have disabled dispatch while retaining
+		// the allocated Vulkan objects.  Re-enabling the negotiated backend must
+		// restore these capability flags after a mode/backend transition.
+		frame_generation_probe.history_enabled = true;
+		frame_generation_probe.backend_enabled = true;
+		frame_generation_probe.color_only_requested = true;
+		return true;
+	}
+	try
+	{
+		const auto extent = render_extent(session.get_info());
+		frame_history.emplace(vk, extent);
+		frame_generation.emplace(vk, extent);
+		frame_generation_flow_backend.emplace(vk, extent);
+		frame_generation_probe.history_enabled = true;
+		frame_generation_probe.backend_enabled = true;
+		frame_generation_probe.color_only_requested = true;
+		U_LOG_IFL_I(log_level,
+		            "Server ASW backend ready: portable hierarchical optical flow, views=2 extent=%ux%u coarse=1/16 refine=1/4 search=%d",
+		            extent.width,
+		            extent.height,
+		            frame_generation_search_radius());
+		return true;
+	}
+	catch (const std::exception & e)
+	{
+		frame_generation_flow_backend.reset();
+		frame_generation.reset();
+		frame_history.reset();
+		frame_generation_probe.history_enabled = false;
+		frame_generation_probe.backend_enabled = false;
+		U_LOG_IFL_W(log_level, "Server ASW initialization failed: %s; retaining real-frame path", e.what());
+		return false;
+	}
+}
+
+void compositor::reset_frame_synthesis_temporal_state()
+{
+	// A backend/cadence transition invalidates every temporal input.  Keeping a
+	// previous pose, optical-flow image, or frame-to-application association
+	// across the transition can make the first frame after resume use stale
+	// timestamps or feed old feedback into a freshly reset pacer.
+	previous_display_time_ns = 0;
+	previous_view_poses_valid = false;
+	if (frame_history)
+		frame_history->valid = false;
+	if (frame_generation)
+		frame_generation->output_valid = false;
+	if (frame_generation_flow_backend)
+		frame_generation_flow_backend->output_valid = false;
+
+	frame_generation_probe.reported = false;
+	frame_generation_probe.last_inputs_ready = false;
+	frame_generation_probe.last_ready_views = 0;
+	frame_generation_probe.feedback_samples = 0;
+	frame_generation_probe.missed_feedback = 0;
+	frame_generation_probe.last_feedback_frame_index = UINT64_MAX;
+	frame_generation_probe.network_deadline_windows = 0;
+	frame_generation_probe.flow_deadline_windows = 0;
+	frame_generation_probe.flow_samples = 0;
+	frame_generation_probe.flow_over_budget = 0;
+	frame_generation_probe.auto_over_budget_windows = 0;
+	frame_generation_probe.auto_headroom_windows = 0;
+	frame_generation_probe.optical_flow_ms = 0;
+	frame_generation_probe.missed_interval_percent = 0;
+
+	// IDs stay monotonic for the headset decoder, but old associations must not
+	// survive a pause/backend switch and be mistaken for current application
+	// frames when delayed feedback arrives.
+	for (auto & mapping: stream_frame_mappings)
+		mapping = {};
+	}
+
+void compositor::set_frame_synthesis_active(bool active)
+{
+	const bool server_backend = frame_generation_probe.backend == frame_synthesis_backend::server_experimental;
+	const bool headset_backend = frame_generation_probe.backend == frame_synthesis_backend::headset_color;
+	active = active && !frame_generation_probe.session_disabled &&
+	         ((server_backend && frame_generation_probe.backend_enabled) || headset_backend);
+	const bool server_double_rate = active && server_backend;
+	if (frame_generation_probe.half_rate_enabled == active &&
+	    frame_generation_probe.double_rate_enabled == server_double_rate)
+		return;
+
+	reset_frame_synthesis_temporal_state();
+	frame_generation_probe.half_rate_enabled = active;
+	frame_generation_probe.double_rate_enabled = server_double_rate;
+	frame_generation_probe.handoff_enabled = server_double_rate;
+	frame_generation_probe.feedback_samples = 0;
+	frame_generation_probe.missed_feedback = 0;
+	frame_generation_probe.last_feedback_frame_index = UINT64_MAX;
+	// Feedback timing learned at 36 Hz is not valid at 72 Hz (or vice versa).
+	// Drop the old decode/display margin before applying the new cadence.
+	pacer.reset();
+	// The compositor now translates monotonic transport IDs back to the
+	// corresponding application frame before passing feedback to the pacer.
+	pacer.set_stream_frame_multiplier(1);
+	pacer.set_frame_duration(uint64_t(double(U_TIME_1S_IN_NS) / frame_rate.load() * (active ? 2.0 : 1.0)));
+	for (auto & encoder: encoders)
+		if (encoder)
+			encoder->set_framerate(server_double_rate ? frame_rate.load()
+			                                             : (active ? frame_rate.load() * 0.5f
+			                                                       : frame_rate.load()));
+
+	U_LOG_IFL_I(log_level,
+	            "Frame synthesis %s backend=%s: application pacing %.0fHz, encode/transport %.0fHz",
+	            active ? "active" : "inactive",
+	            std::string(magic_enum::enum_name(frame_generation_probe.backend)).c_str(),
+	            active ? frame_rate.load() * 0.5f : frame_rate.load(),
+	            server_double_rate ? frame_rate.load() : (active ? frame_rate.load() * 0.5f : frame_rate.load()));
+	// MediaCodec timestamps and frame-index recovery use the encoded cadence.
+	// Client-side SSW therefore advertises 36 Hz for a 36->72 session, while
+	// server ASW continues to advertise the full transport cadence.
+	if (encoders[0])
+		send_video_stream_description();
+}
+
+void compositor::disable_frame_synthesis_for_session(runtime_fallback_reason reason)
+{
+	if (frame_generation_probe.session_disabled)
+		return;
+	frame_generation_probe.session_disabled = true;
+	frame_generation_probe.fallback_reason = reason;
+	set_frame_synthesis_active(false);
+	U_LOG_IFL_W(log_level,
+	            "Frame synthesis disabled until reconnect: backend=%s reason=%s; real frames and headset ATW remain active",
+	            std::string(magic_enum::enum_name(frame_generation_probe.backend)).c_str(),
+	            std::string(magic_enum::enum_name(reason)).c_str());
+	send_runtime_telemetry();
+}
+
+void compositor::send_runtime_telemetry()
+{
+	const auto & info = session.get_info();
+	session.send_control(to_headset::runtime_telemetry{
+	        .requested_upscaling = scaling_selection.requested,
+	        .effective_upscaling = scaling_selection.effective,
+	        .requested_frame_synthesis = frame_generation_probe.mode,
+	        .requested_frame_synthesis_backend = session.get_requested_frame_synthesis_backend(),
+	        .effective_frame_synthesis_backend = frame_generation_probe.backend,
+	        .frame_synthesis_capabilities = uint8_t(session.get_server_frame_synthesis_capabilities() |
+	                                                session.get_headset_frame_synthesis_capabilities()),
+	        .frame_synthesis_active = frame_generation_probe.half_rate_enabled,
+	        .render_eye_width = info.render_eye_width,
+	        .render_eye_height = info.render_eye_height,
+	        .target_eye_width = info.target_eye_width,
+	        .target_eye_height = info.target_eye_height,
+	        .real_frames = frame_generation_probe.real_frames,
+	        .synthetic_frames = frame_generation_probe.synthetic_frames,
+	        .optical_flow_ms = frame_generation_probe.optical_flow_ms,
+	        .missed_interval_percent = frame_generation_probe.missed_interval_percent,
+	        .fallback_reason = frame_generation_probe.fallback_reason,
+	});
+}
+
+void compositor::update_frame_synthesis_policy(float optical_flow_ms)
+{
+	frame_generation_probe.optical_flow_ms = optical_flow_ms;
+	if (frame_generation_probe.double_rate_enabled)
+	{
+		frame_generation_probe.flow_samples++;
+		const float display_period_ms = 1000.0f / frame_rate.load();
+		if (optical_flow_ms > display_period_ms * 0.55f)
+			frame_generation_probe.flow_over_budget++;
+		if (frame_generation_probe.flow_samples >= 180)
+		{
+			const float missed = 100.0f * frame_generation_probe.flow_over_budget /
+			                     frame_generation_probe.flow_samples;
+			frame_generation_probe.flow_deadline_windows = missed > 1.0f
+			                                                       ? frame_generation_probe.flow_deadline_windows + 1
+			                                                       : 0;
+			frame_generation_probe.flow_samples = 0;
+			frame_generation_probe.flow_over_budget = 0;
+			if (frame_generation_probe.flow_deadline_windows >= 3)
+			{
+				disable_frame_synthesis_for_session(runtime_fallback_reason::optical_flow_deadline);
+				return;
+			}
+		}
+	}
+
+	if (frame_generation_probe.mode == frame_synthesis_mode::automatic &&
+	    !frame_generation_probe.session_disabled && frame_generation_probe.frames % 180 == 0)
+	{
+		const float display_period_ns = float(U_TIME_1S_IN_NS) / frame_rate.load();
+		const float application_time_ns = float(session.application_frame_time());
+		if (!frame_generation_probe.half_rate_enabled)
+		{
+			frame_generation_probe.auto_over_budget_windows = application_time_ns > display_period_ns * 0.90f
+			                                                          ? frame_generation_probe.auto_over_budget_windows + 1
+			                                                          : 0;
+			if (frame_generation_probe.auto_over_budget_windows >= 3)
+			{
+				frame_generation_probe.auto_over_budget_windows = 0;
+				set_frame_synthesis_active(true);
+			}
+		}
+		else
+		{
+			frame_generation_probe.auto_headroom_windows = application_time_ns < display_period_ns * 0.70f
+			                                                       ? frame_generation_probe.auto_headroom_windows + 1
+			                                                       : 0;
+			if (frame_generation_probe.auto_headroom_windows >= 3)
+			{
+				frame_generation_probe.auto_headroom_windows = 0;
+				set_frame_synthesis_active(false);
+			}
+		}
+		send_runtime_telemetry();
+	}
+	else if (frame_generation_probe.requested && frame_generation_probe.frames > 0 &&
+	         frame_generation_probe.frames % 180 == 0)
+		send_runtime_telemetry();
+}
+
+void compositor::set_frame_synthesis_mode(frame_synthesis_mode mode)
+{
+	std::lock_guard frame_lock(frame_mutex);
+	if (frame_synthesis_forced_off() && mode != frame_synthesis_mode::off)
+	{
+		U_LOG_IFL_W(log_level,
+		            "Ignoring requested frame synthesis mode %s because WIVRN_DISABLE_FRAME_SYNTHESIS is set",
+		            std::string(magic_enum::enum_name(mode)).c_str());
+		mode = frame_synthesis_mode::off;
+	}
+	if (frame_generation_probe.mode == mode)
+	{
+		// The session applies the negotiated state immediately after compositor
+		// construction; emit initial telemetry even when it already matches the
+		// constructor's probe.
+		send_runtime_telemetry();
+		return;
+	}
+	frame_generation_probe.mode = mode;
+	frame_generation_probe.requested = mode != frame_synthesis_mode::off &&
+	                                   frame_generation_probe.backend != frame_synthesis_backend::auto_select;
+	frame_generation_probe.frames = 0;
+	frame_generation_probe.auto_over_budget_windows = 0;
+	frame_generation_probe.auto_headroom_windows = 0;
+	reset_frame_synthesis_temporal_state();
+
+	if (mode == frame_synthesis_mode::off)
+	{
+		frame_generation_probe.fallback_reason = runtime_fallback_reason::none;
+		frame_generation_probe.session_disabled = false;
+		set_frame_synthesis_active(false);
+		send_runtime_telemetry();
+		return;
+	}
+	frame_generation_probe.fallback_reason = runtime_fallback_reason::none;
+	if (frame_generation_probe.backend == frame_synthesis_backend::auto_select)
+	{
+		frame_generation_probe.fallback_reason = runtime_fallback_reason::unsupported;
+		frame_generation_probe.session_disabled = true;
+		set_frame_synthesis_active(false);
+		send_runtime_telemetry();
+		return;
+	}
+	if (frame_generation_probe.backend == frame_synthesis_backend::server_experimental &&
+	    !initialize_frame_synthesis_backend())
+	{
+		disable_frame_synthesis_for_session(runtime_fallback_reason::unsupported);
+		return;
+	}
+	set_frame_synthesis_active(mode == frame_synthesis_mode::always);
+	send_runtime_telemetry();
+}
+
+void compositor::set_frame_synthesis_backend(frame_synthesis_backend backend)
+{
+	std::lock_guard frame_lock(frame_mutex);
+	// The session owns Auto negotiation.  `auto_select` reaching the compositor
+	// means that no safe backend was negotiated; do not silently enable the
+	// bandwidth-heavy server implementation here.
+	if (backend == frame_synthesis_backend::headset_color &&
+	         !has_frame_synthesis_capability(session.get_headset_frame_synthesis_capabilities(),
+	                                         frame_synthesis_capability::headset_color))
+	{
+		backend = frame_synthesis_backend::auto_select;
+	}
+	if (backend == frame_synthesis_backend::server_experimental &&
+	    !has_frame_synthesis_capability(session.get_server_frame_synthesis_capabilities(),
+	                                    frame_synthesis_capability::server_experimental))
+	{
+		backend = frame_synthesis_backend::auto_select;
+	}
+
+	if (frame_generation_probe.backend == backend)
+		return;
+
+	set_frame_synthesis_active(false);
+	frame_generation_probe.backend = backend;
+	frame_generation_probe.requested = frame_generation_probe.mode != frame_synthesis_mode::off &&
+	                                   backend != frame_synthesis_backend::auto_select;
+	frame_generation_probe.session_disabled = backend == frame_synthesis_backend::auto_select &&
+	                                         frame_generation_probe.mode != frame_synthesis_mode::off;
+	frame_generation_probe.fallback_reason = frame_generation_probe.session_disabled
+	                                                  ? runtime_fallback_reason::unsupported
+	                                                  : runtime_fallback_reason::none;
+	frame_generation_probe.frames = 0;
+	frame_generation_probe.auto_over_budget_windows = 0;
+	frame_generation_probe.auto_headroom_windows = 0;
+	reset_frame_synthesis_temporal_state();
+
+	if (frame_generation_probe.requested && backend == frame_synthesis_backend::server_experimental &&
+	    !initialize_frame_synthesis_backend())
+	{
+		frame_generation_probe.session_disabled = true;
+		frame_generation_probe.fallback_reason = runtime_fallback_reason::unsupported;
+	}
+	set_frame_synthesis_active(frame_generation_probe.mode == frame_synthesis_mode::always);
+	send_runtime_telemetry();
+}
+
 void compositor::set_framerate(float hz)
 {
-	if (frame_rate.exchange(hz) == hz)
+	std::lock_guard frame_lock(frame_mutex);
+	const float previous_hz = frame_rate.exchange(hz);
+	if (previous_hz == hz)
 		return;
-	U_LOG_IFL_D(log_level, "Framerate change from %.0f to %.0f", frame_rate.load(), hz);
+	U_LOG_IFL_D(log_level, "Framerate change from %.0f to %.0f", previous_hz, hz);
 	pacer.set_frame_duration(uint64_t(double(U_TIME_1S_IN_NS) / hz *
-	                                  (frame_generation_probe.double_rate_enabled ? 2.0 : 1.0)));
+	                                  (frame_generation_probe.half_rate_enabled ? 2.0 : 1.0)));
 	for (auto & encoder: encoders)
-		encoder->set_framerate(hz);
+		if (encoder)
+			encoder->set_framerate(frame_generation_probe.double_rate_enabled
+			                               ? hz
+			                               : (frame_generation_probe.half_rate_enabled ? hz * 0.5f : hz));
+	// A refresh-rate change while headset_color is active changes the single
+	// encoded cadence (for example 36 Hz at a 72 Hz display).  Send the new
+	// effective description together with the encoder update so the headset
+	// never keeps a stale pacing/timestamp contract.
+	if (encoders[0])
+		send_video_stream_description();
 }
 
 void compositor::update_tracking(const from_headset::tracking & tracking)
@@ -2244,28 +2475,41 @@ void compositor::resume()
 	if (!paused.load())
 	{
 		// The first session start also needs descriptors and an IDR.
+		reset_frame_synthesis_temporal_state();
 		for (auto & encoder: encoders)
 			encoder->reset();
 		send_video_stream_description();
+		send_runtime_telemetry();
 		return;
 	}
 
 	for (auto & encoder: encoders)
 		encoder->reset();
 	pacer.reset();
+	reset_frame_synthesis_temporal_state();
+	frame_generation_probe.session_disabled = false;
+	frame_generation_probe.fallback_reason = runtime_fallback_reason::none;
+	frame_generation_probe.auto_over_budget_windows = 0;
+	frame_generation_probe.auto_headroom_windows = 0;
+	frame_generation_probe.flow_deadline_windows = 0;
+	frame_generation_probe.flow_samples = 0;
+	frame_generation_probe.flow_over_budget = 0;
+	frame_generation_probe.network_deadline_windows = 0;
+	frame_generation_probe.feedback_samples = 0;
+	frame_generation_probe.missed_feedback = 0;
+	frame_generation_probe.last_feedback_frame_index = UINT64_MAX;
+	frame_generation_probe.missed_interval_percent = 0;
+	if (frame_generation_probe.mode != frame_synthesis_mode::off &&
+	    frame_generation_probe.backend == frame_synthesis_backend::server_experimental &&
+	    !initialize_frame_synthesis_backend())
+	{
+		frame_generation_probe.session_disabled = true;
+		frame_generation_probe.fallback_reason = runtime_fallback_reason::unsupported;
+	}
+	set_frame_synthesis_active(frame_generation_probe.mode == frame_synthesis_mode::always);
 	frame_generation_probe.frames = 0;
-	frame_generation_probe.reported = false;
-	frame_generation_probe.last_inputs_ready = false;
-	frame_generation_probe.last_ready_views = 0;
-	if (frame_history)
-		frame_history->valid = false;
-	if (frame_generation)
-		frame_generation->output_valid = false;
-	if (frame_generation_flow_backend)
-		frame_generation_flow_backend->output_valid = false;
-	previous_display_time_ns = 0;
-	previous_view_poses_valid = false;
 	send_video_stream_description();
+	send_runtime_telemetry();
 	paused = false;
 }
 
@@ -2294,19 +2538,11 @@ void compositor::pause()
 	encode_cv.notify_all();
 	comp_frame_clear_locked(&frame.waited);
 	comp_frame_clear_locked(&frame.rendering);
+	set_frame_synthesis_active(false);
+	reset_frame_synthesis_temporal_state();
 	pacer.reset();
 	frame_generation_probe.frames = 0;
-	frame_generation_probe.reported = false;
-	frame_generation_probe.last_inputs_ready = false;
-	frame_generation_probe.last_ready_views = 0;
-	if (frame_history)
-		frame_history->valid = false;
-	if (frame_generation)
-		frame_generation->output_valid = false;
-	if (frame_generation_flow_backend)
-		frame_generation_flow_backend->output_valid = false;
-	previous_display_time_ns = 0;
-	previous_view_poses_valid = false;
+	send_runtime_telemetry();
 }
 
 void compositor::on_feedback(const from_headset::feedback & feedback, const clock_offset & o)
@@ -2317,7 +2553,57 @@ void compositor::on_feedback(const from_headset::feedback & feedback, const cloc
 	encoders[stream]->on_feedback(feedback);
 	if (not o)
 		return;
-	pacer.on_feedback(feedback, o);
+
+	std::lock_guard frame_lock(frame_mutex);
+	const auto & mapping = stream_frame_mappings[feedback.frame_index % stream_frame_mappings.size()];
+	if (mapping.stream_frame_index == feedback.frame_index && mapping.application_frame)
+	{
+		auto application_feedback = feedback;
+		application_feedback.frame_index = mapping.application_frame_id;
+		pacer.on_feedback(application_feedback, o);
+	}
+	if (stream != 0 || !feedback.blitted)
+		return;
+	if (!frame_generation_probe.double_rate_enabled)
+		return;
+	// Overlay-only clients such as WayVR do not provide a stereo projection
+	// image that optical flow can synthesize.  Their perfectly valid display
+	// feedback must not be interpreted as missed ASW intervals while waiting
+	// for a game projection layer to appear.
+	if (!frame_generation_probe.last_inputs_ready)
+	{
+		frame_generation_probe.last_feedback_frame_index = feedback.frame_index;
+		frame_generation_probe.feedback_samples = 0;
+		frame_generation_probe.missed_feedback = 0;
+		frame_generation_probe.network_deadline_windows = 0;
+		frame_generation_probe.missed_interval_percent = 0;
+		return;
+	}
+	if (frame_generation_probe.last_feedback_frame_index != UINT64_MAX &&
+	    feedback.frame_index > frame_generation_probe.last_feedback_frame_index + 1)
+	{
+		const auto gap = std::min<uint64_t>(
+		        feedback.frame_index - frame_generation_probe.last_feedback_frame_index - 1,
+		        180);
+		frame_generation_probe.feedback_samples += gap;
+		frame_generation_probe.missed_feedback += gap;
+	}
+	frame_generation_probe.last_feedback_frame_index = feedback.frame_index;
+	frame_generation_probe.feedback_samples++;
+	if (feedback.times_displayed != 1 || !feedback.displayed || !feedback.blitted)
+		frame_generation_probe.missed_feedback++;
+	if (frame_generation_probe.feedback_samples < 180)
+		return;
+
+	frame_generation_probe.missed_interval_percent =
+	        100.0f * frame_generation_probe.missed_feedback / frame_generation_probe.feedback_samples;
+	frame_generation_probe.network_deadline_windows = frame_generation_probe.missed_interval_percent > 1.0f
+	                                                          ? frame_generation_probe.network_deadline_windows + 1
+	                                                          : 0;
+	frame_generation_probe.feedback_samples = 0;
+	frame_generation_probe.missed_feedback = 0;
+	if (frame_generation_probe.network_deadline_windows >= 3)
+		disable_frame_synthesis_for_session(runtime_fallback_reason::encode_or_network_deadline);
 }
 
 } // namespace wivrn

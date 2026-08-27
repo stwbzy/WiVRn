@@ -91,11 +91,15 @@ struct android_blit_handle : public decoder::blit_handle
 	        vk::ImageLayout & current_layout,
 	        decltype(vk_data) vk_data,
 	        decltype(image_reader) image_reader,
-	        decltype(aimage) aimage) :
+	        decltype(aimage) aimage,
+	        AHardwareBuffer * hardware_buffer) :
 	        decoder::blit_handle(feedback, view_info, image_view, image, extent, current_layout),
 	        vk_data(vk_data),
 	        image_reader(image_reader),
-	        aimage(std::move(aimage)) {}
+	        aimage(std::move(aimage))
+	{
+		native_hardware_buffer = hardware_buffer;
+	}
 };
 
 } // namespace
@@ -336,6 +340,8 @@ void decoder::on_image_available(AImageReader * reader)
 		assert(info->feedback.frame_index == frame_index);
 
 		auto vk_data = map_hardware_buffer(image.get());
+		AHardwareBuffer * hardware_buffer = nullptr;
+		check(AImage_getHardwareBuffer(image.get(), &hardware_buffer), "AImage_getHardwareBuffer");
 
 		auto handle = std::make_shared<android_blit_handle>(
 		        info->feedback,
@@ -346,7 +352,8 @@ void decoder::on_image_available(AImageReader * reader)
 		        vk_data->layout,
 		        std::move(vk_data),
 		        image_reader,
-		        std::move(image));
+		        std::move(image),
+		        hardware_buffer);
 
 		if (auto scene = weak_scene.lock())
 			scene->push_blit_handle(accumulator, std::move(handle));

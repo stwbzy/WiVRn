@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=WiVRn FSR Runtime Server
+Comment=Start the WiVRn PCVR streamer with FSR runtime features
+Exec=wivrn-server
+Icon=io.github.wivrn.wivrn
+Terminal=true
+Categories=Utility;

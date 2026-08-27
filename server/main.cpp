@@ -39,6 +39,7 @@
 #include <memory>
 #include <poll.h>
 #include <random>
+#include <sys/file.h>
 #include <sys/signalfd.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -177,6 +178,7 @@ static std::string steam_command()
 namespace
 {
 int control_pipe_fds[2];
+int instance_lock_fd = -1;
 
 GMainLoop * main_loop;
 const AvahiPoll * poll_api;
@@ -191,6 +193,7 @@ std::unique_ptr<children_manager> children;
 bool quitting_main_loop;
 bool do_fork;
 bool do_active_runtime;
+bool do_early_active_runtime;
 #if WIVRN_FEATURE_DEBUG_GUI
 bool show_debug_gui;
 #endif
@@ -980,6 +983,12 @@ void on_name_acquired(GDBusConnection * connection, const gchar * name, gpointer
 
 	wivrn_server_set_client_tab(dbus_server, "");
 	expose_connection_state();
+
+	// Do not accept headset connections until the D-Bus service and child
+	// manager are fully initialized. A connection in this window previously
+	// dereferenced a null `children` pointer in headset_connected().
+	start_publishing();
+	start_listening();
 }
 
 auto create_dbus_connection()
@@ -1025,6 +1034,31 @@ int inner_main(int argc, char * argv[], bool show_instructions)
 
 	std::filesystem::create_directories(socket_path().parent_path());
 
+	// Protect the compositor socket before attempting stale-socket cleanup.
+	// D-Bus name acquisition is asynchronous, so it cannot by itself prevent a
+	// second process from unlinking the live server's socket during startup.
+	auto lock_path = socket_path();
+	lock_path += ".lock";
+	instance_lock_fd = open(lock_path.c_str(), O_CREAT | O_CLOEXEC | O_RDWR, 0600);
+	if (instance_lock_fd < 0)
+		throw std::system_error(errno, std::system_category(), "Cannot open WiVRn instance lock");
+	if (flock(instance_lock_fd, LOCK_EX | LOCK_NB) < 0)
+	{
+		const int lock_error = errno;
+		close(instance_lock_fd);
+		instance_lock_fd = -1;
+		if (lock_error == EWOULDBLOCK or lock_error == EAGAIN)
+			throw std::runtime_error("Another WiVRn server instance is already running");
+		throw std::system_error(lock_error, std::system_category(), "Cannot lock WiVRn instance");
+	}
+
+	// `--early-active-runtime` must not touch the user's runtime manifests until
+	// this process owns the instance lock. Otherwise, a second server invocation
+	// can fail the lock check and then remove the active runtime still owned by
+	// the first server from active_runtime's destructor.
+	if (do_early_active_runtime)
+		runtime_setter.emplace();
+
 	if (do_active_runtime)
 		active_runtime::cleanup_openxr();
 	listen_socket = create_listen_socket();
@@ -1053,12 +1087,6 @@ int inner_main(int argc, char * argv[], bool show_instructions)
 	g_source_attach(control_listener, nullptr);
 	g_source_unref(control_listener);
 
-	// Initialize avahi publisher
-	start_publishing();
-
-	// Initialize listener
-	start_listening();
-
 	// Catch SIGINT & SIGTERM
 	g_unix_signal_add(SIGINT, &sigint, (void *)SIGINT);
 	g_unix_signal_add(SIGTERM, &sigint, (void *)SIGTERM);
@@ -1084,6 +1112,11 @@ int inner_main(int argc, char * argv[], bool show_instructions)
 	runtime_setter.reset();
 	stop_publishing();
 	stop_listening();
+	if (instance_lock_fd >= 0)
+	{
+		close(instance_lock_fd);
+		instance_lock_fd = -1;
+	}
 	avahi_glib_poll_free(glib_poll);
 	g_main_loop_unref(main_loop);
 
@@ -1124,10 +1157,13 @@ int main(int argc, char * argv[])
 	if (*early_active_runtime)
 	{
 		do_active_runtime = false;
-		runtime_setter.emplace();
+		do_early_active_runtime = true;
 	}
 	else
+	{
 		do_active_runtime = not *no_active_runtime;
+		do_early_active_runtime = false;
+	}
 
 	do_fork = not *no_fork;
 	if (*no_encrypt)

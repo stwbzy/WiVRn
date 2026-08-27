@@ -13,13 +13,17 @@
 
 namespace wivrn
 {
-#ifndef WIVRN_ENABLE_EXPERIMENTAL_FRAME_GENERATION
-#define WIVRN_ENABLE_EXPERIMENTAL_FRAME_GENERATION 0
-#endif
+struct upscaling_selection
+{
+	upscaling_mode requested = upscaling_mode::native;
+	upscaling_mode effective = upscaling_mode::native;
+	runtime_fallback_reason fallback_reason = runtime_fallback_reason::none;
+};
 
-bool fsr_upscaling_requested();
-bool fsr_frame_generation_enabled();
+bool legacy_fsr_upscaling_requested();
 float fsr_rcas_sharpness_stops();
+bool meaningful_upscale(uint32_t input_width, uint32_t input_height, uint32_t output_width, uint32_t output_height);
+upscaling_selection select_upscaling(const from_headset::headset_info_packet &);
 std::array<uint32_t, 2> fsr_output_dimensions(const from_headset::headset_info_packet &);
 std::array<uint32_t, 2> fsr_stream_dimensions(const from_headset::headset_info_packet &);
 } // namespace wivrn

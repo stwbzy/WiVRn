@@ -18,6 +18,7 @@
  */
 
 #include "wivrn_serialization.h"
+#include "wivrn_packets.h"
 
 using namespace wivrn;
 
@@ -59,4 +60,14 @@ enum test_enum : uint32_t
 	foobar = 42
 };
 static_assert(serialization_type_hash<test_enum>(0) == hash("enum32{foo=0,bar=1,foobar=42}"));
+
+// Keep the FBT protocol types on the regular Boost.PFR path.  Besides
+// documenting the intended wire shape, these assertions catch accidental
+// introduction of a non-serializable helper (for example a reference or a
+// pointer) at compile time.
+static_assert(serialization_type_hash<body_tracking_settings>(0) != 0);
+static_assert(serialization_type_hash<from_headset::body_tracking_reset_request>(0) ==
+              hash("structure{uint64,enum8{none=0,calibration=1,tracking=2,all=3},uint64,uint64}"));
+static_assert(serialization_type_hash<to_headset::body_tracking_reset_ack>(0) ==
+              hash("structure{uint64,enum8{none=0,calibration=1,tracking=2,all=3},uint8,uint64,uint64}"));
 } // namespace

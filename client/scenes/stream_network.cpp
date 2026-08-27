@@ -23,6 +23,7 @@
 #include "utils/i18n.h"
 #include "utils/named_thread.h"
 
+#include <magic_enum.hpp>
 #include <spdlog/spdlog.h>
 #include <uni_algo/case.h>
 
@@ -209,6 +210,7 @@ void scenes::stream::process_packets()
 			display_time_period = 0;
 			real_display_period = 0;
 			set_state(state::initializing);
+			reset_scaling_watchdog_requested = true;
 			spdlog::info("Connection resumed and validated at generation {}", network_session->generation());
 		}
 		catch (std::exception & e)
@@ -302,6 +304,64 @@ void scenes::stream::operator()(to_headset::server_message && message)
 			break;
 		}
 	}
+}
+
+void scenes::stream::operator()(to_headset::runtime_telemetry && telemetry)
+{
+	*server_runtime_telemetry.lock() = std::move(telemetry);
+}
+
+void scenes::stream::operator()(to_headset::body_tracking_reset_ack && ack)
+{
+	if (ack.connection_generation != network_session->generation())
+	{
+		network_session->discard_packet();
+		return;
+	}
+
+	if (ack.accepted)
+	{
+		auto current = body_epoch.load(std::memory_order_relaxed);
+		while (current < ack.body_epoch &&
+		       !body_epoch.compare_exchange_weak(current, ack.body_epoch, std::memory_order_relaxed))
+		{
+		}
+		spdlog::info("Body tracking reset {} acknowledged at epoch {}",
+		             magic_enum::enum_name(ack.reset),
+		             ack.body_epoch);
+		auto toast = gui_toast.lock();
+		toast->emplace(_("Body tracking reset complete."), false);
+	}
+	else
+	{
+		spdlog::warn("Body tracking reset {} was rejected by the server", magic_enum::enum_name(ack.reset));
+		auto toast = gui_toast.lock();
+		toast->emplace(_("The server rejected the body tracking reset."), true);
+	}
+	gui_status_last_change = instance.now();
+}
+
+void scenes::stream::operator()(to_headset::body_tracking_status && status)
+{
+	if (status.connection_generation != network_session->generation())
+	{
+		network_session->discard_packet();
+		return;
+	}
+	const auto current_epoch = body_epoch.load(std::memory_order_relaxed);
+	if (status.body_epoch < current_epoch)
+	{
+		spdlog::debug("Ignoring stale body tracking status epoch {} (current {})",
+		              status.body_epoch,
+		              current_epoch);
+		return;
+	}
+	auto observed_epoch = current_epoch;
+	while (observed_epoch < status.body_epoch &&
+	       !body_epoch.compare_exchange_weak(observed_epoch, status.body_epoch, std::memory_order_relaxed))
+	{
+	}
+	*body_tracking_status.lock() = std::move(status);
 }
 
 void scenes::stream::operator()(to_headset::video_stream_data_shard && shard)
@@ -398,7 +458,15 @@ void scenes::stream::send_feedback(const wivrn::from_headset::feedback & feedbac
 {
 	try
 	{
-		network_session->send_control(wivrn::from_headset::feedback{feedback});
+		// Feedback objects are created by each decoder accumulator and outlive
+		// transport reconnects. Stamp them at the single send point so the
+		// server can accept both decode and display feedback for the current
+		// connection generation. Leaving the default value (zero) makes every
+		// packet get discarded after the initial handshake and silently disables
+		// pacer feedback and the ASW encode/network deadline watchdog.
+		auto packet = feedback;
+		packet.connection_generation = network_session->generation();
+		network_session->send_control(std::move(packet));
 	}
 	catch (std::exception & e)
 	{

@@ -26,19 +26,76 @@ bool parse_bool(const char * value)
 
 namespace wivrn
 {
-bool fsr_upscaling_requested()
+bool legacy_fsr_upscaling_requested()
 {
 	static const bool enabled = parse_bool(std::getenv("WIVRN_FSR_UPSCALING"));
 	return enabled;
 }
 
-bool fsr_frame_generation_enabled()
+bool meaningful_upscale(uint32_t input_width,
+                        uint32_t input_height,
+                        uint32_t output_width,
+                        uint32_t output_height)
 {
-	// Keep the unstable synthesis path opt-in at build time. Runtime frame
-	// generation variables are intentionally ignored by the default build so a
-	// stale launch command cannot switch the compositor into the black-screen
-	// path while the implementation is being repaired.
-	return WIVRN_ENABLE_EXPERIMENTAL_FRAME_GENERATION != 0;
+	if (input_width == 0 || input_height == 0 || output_width <= input_width || output_height <= input_height)
+		return false;
+	// Expensive reconstruction below ten percent per dimension is visually
+	// indistinguishable from the fused path on the target devices.
+	return uint64_t(output_width) * 10 >= uint64_t(input_width) * 11 ||
+	       uint64_t(output_height) * 10 >= uint64_t(input_height) * 11;
+}
+
+upscaling_selection select_upscaling(const from_headset::headset_info_packet & info)
+{
+	upscaling_selection result{
+	        .requested = info.upscaling,
+	        .effective = info.upscaling,
+	};
+	if (result.requested == upscaling_mode::native && legacy_fsr_upscaling_requested())
+	{
+		result.requested = upscaling_mode::fsr1;
+		result.effective = upscaling_mode::fsr1;
+	}
+
+	const uint32_t target_width = info.target_eye_width ? info.target_eye_width : info.native_eye_width;
+	const uint32_t target_height = info.target_eye_height ? info.target_eye_height : info.native_eye_height;
+	if (result.effective == upscaling_mode::native)
+		return result;
+
+	if (!meaningful_upscale(info.render_eye_width, info.render_eye_height, target_width, target_height))
+	{
+		result.effective = info.meta_compositor_available ? upscaling_mode::meta_compositor
+		                                                  : upscaling_mode::bilinear;
+		result.fallback_reason = runtime_fallback_reason::upscale_below_threshold;
+		return result;
+	}
+
+	if (result.effective == upscaling_mode::meta_compositor && !info.meta_compositor_available)
+	{
+		result.effective = upscaling_mode::bilinear;
+		result.fallback_reason = runtime_fallback_reason::unsupported;
+	}
+	if (result.effective == upscaling_mode::fsr1)
+	{
+		const uint64_t input_area = uint64_t(info.render_eye_width) * info.render_eye_height;
+		const uint64_t output_area = uint64_t(target_width) * target_height;
+		if (input_area == 0 || target_width < info.render_eye_width || target_height < info.render_eye_height ||
+		    output_area > input_area * 4)
+		{
+			result.effective = info.meta_compositor_available ? upscaling_mode::meta_compositor
+			                                                  : upscaling_mode::bilinear;
+			result.fallback_reason = runtime_fallback_reason::unsupported;
+		}
+	}
+	// NIS was not present in this fork.  Preserve the configuration value while
+	// using the safe fused sampler until a portable NIS shader is built in.
+	if (result.effective == upscaling_mode::nis)
+	{
+		result.effective = info.meta_compositor_available ? upscaling_mode::meta_compositor
+		                                                  : upscaling_mode::bilinear;
+		result.fallback_reason = runtime_fallback_reason::unsupported;
+	}
+	return result;
 }
 
 float fsr_rcas_sharpness_stops()
@@ -59,18 +116,20 @@ float fsr_rcas_sharpness_stops()
 std::array<uint32_t, 2> fsr_output_dimensions(const from_headset::headset_info_packet & info)
 {
 	const std::array input{uint32_t(info.render_eye_width), uint32_t(info.render_eye_height)};
-	if (!fsr_upscaling_requested() || info.native_eye_width < info.render_eye_width ||
-	    info.native_eye_height < info.render_eye_height || info.native_eye_width == 0 ||
-	    info.native_eye_height == 0)
+	const auto selection = select_upscaling(info);
+	const uint32_t target_width = info.target_eye_width ? info.target_eye_width : info.native_eye_width;
+	const uint32_t target_height = info.target_eye_height ? info.target_eye_height : info.native_eye_height;
+	if (selection.effective != upscaling_mode::fsr1 || target_width < info.render_eye_width ||
+	    target_height < info.render_eye_height || target_width == 0 || target_height == 0)
 		return input;
 
 	const uint64_t input_area = uint64_t(input[0]) * input[1];
-	const uint64_t output_area = uint64_t(info.native_eye_width) * info.native_eye_height;
+	const uint64_t output_area = uint64_t(target_width) * target_height;
 	// AMD documents EASU for a 1x through 4x output/input area range.
 	if (input_area == 0 || output_area > input_area * 4)
 		return input;
 
-	return {info.native_eye_width, info.native_eye_height};
+	return {target_width, target_height};
 }
 
 std::array<uint32_t, 2> fsr_stream_dimensions(const from_headset::headset_info_packet & info)

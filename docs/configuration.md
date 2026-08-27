@@ -199,21 +199,45 @@ Default value: unset
 
 If set, overrides the name displayed in the server list.
 
-## FSR 1 spatial upscaling
+## Quest scaling and frame synthesis
 
-FSR 1 is deliberately not persisted in the public JSON configuration. Start
-the local server with environment variables:
+The headset Video page persists `target_resolution_scale`, `upscaling`,
+`frame_synthesis_mode` and `frame_synthesis_backend`. Existing scaling values
+remain valid. A legacy `fps_divider=2` entry is removed, migrated to frame
+synthesis Off and reported to the user because the old setting did not
+generate missing frames.
 
-- `WIVRN_FSR_UPSCALING=1` enables EASU + RCAS from the reduced headset render
-  resolution to its original recommended resolution.
-- `WIVRN_FSR_SHARPNESS=0.2` selects RCAS sharpness in stops (`0` strongest,
-  accepted range `0`–`2`).
-- The `WIVRN_FSR_FRAME_GENERATION_*` variables are ignored by the default
-  build. Frame generation is paused while its black-screen and cadence issues
-  are repaired.
+`upscaling` accepts `native`, `meta_compositor`, `sgsr1`, `fsr1`, `nis` and
+`bilinear`. `frame_synthesis_mode` accepts `off`, `auto` and `always`.
+`frame_synthesis_backend` accepts `auto`, `headset_color` and
+`server_experimental`:
 
-Set **Render resolution** in the headset UI to 70–85% before connecting;
-FSR spatial reconstruction is inactive at 100%. Do not enable headset
-Application SpaceWarp for this FSR-only test. See
-[fsr-frame-generation.md](fsr-frame-generation.md) for the command and
-expected logs.
+| Backend | Where synthesis runs | Cadence/transport contract |
+| --- | --- | --- |
+| `auto` | Negotiate the functional Vulkan client path when advertised | Selects `headset_color` when viable; otherwise remains on real frames plus ATW. It never silently falls back to `server_experimental`. |
+| `headset_color` | Headset Vulkan client after decode | Only the half-rate real frames are transported; intermediate color frames are generated locally and still go through ATW. The QCOM EGL/AHardwareBuffer probe is optional and does not currently feed the Vulkan warp. |
+| `server_experimental` | Linux PC compositor before encode | Half-rate application pacing, but real and synthetic frames are encoded and transported at the full display cadence. This does not reduce bandwidth. |
+
+Every new mode is opt-in; Native plus Off is the stable baseline. Unknown
+backend values are normalized to `auto` rather than enabling an experimental
+path.
+
+`always` requests the selected backend to synthesize each missing display slot
+immediately, but it is not a promise that synthesis will remain active. With
+`headset_color`, only half-rate real frames are transported; with
+`server_experimental`, the synthetic slots are transported at full cadence.
+Backend-specific optical-flow, timing or encode/network deadline failures
+disable synthesis for the rest of the connection while preserving `always` as
+the saved preference. Changing the setting live resets temporal history and
+pacing. Reconnect to start a new experimental attempt. `auto` remains
+capability/timing gated. Use `off` when establishing a latency or image-quality
+control result.
+
+The 2026-08-13 Quest 3S test reached 36 Hz application / 72 Hz transport in
+Always, then correctly fell back with `encode_or_network_deadline` after
+missing video shards. This validates the safeguard, not Always-mode stability.
+
+`WIVRN_FSR_UPSCALING=1` remains as a legacy server-side FSR1 override and
+`WIVRN_FSR_SHARPNESS` controls RCAS sharpness. Frame synthesis is controlled
+by the headset setting, not `WIVRN_FSR_FRAME_GENERATION_*` variables. See
+[Quest compositor scaling and runtime frame synthesis](fsr-frame-generation.md).

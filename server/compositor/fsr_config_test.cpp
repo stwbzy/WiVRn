@@ -21,15 +21,14 @@ void check(bool condition)
 
 int main()
 {
-	setenv("WIVRN_FSR_FRAME_GENERATION", "1", 1);
-	check(!wivrn::fsr_frame_generation_enabled());
-
 	setenv("WIVRN_FSR_UPSCALING", "1", 1);
 	setenv("WIVRN_FSR_SHARPNESS", "0.4", 1);
 
 	wivrn::from_headset::headset_info_packet info{};
 	info.native_eye_width = 2000;
 	info.native_eye_height = 2200;
+	info.target_eye_width = 2000;
+	info.target_eye_height = 2200;
 	info.render_eye_width = 1600;
 	info.render_eye_height = 1760;
 	info.stream_eye_width = 960;
@@ -54,4 +53,51 @@ int main()
 	info.stream_eye_height = 720;
 	check((wivrn::fsr_output_dimensions(info) == std::array<uint32_t, 2>{900, 900}));
 	check((wivrn::fsr_stream_dimensions(info) == std::array<uint32_t, 2>{720, 720}));
+
+	// The 10% gate prevents an expensive 100 -> 101% reconstruction pass.
+	info = {};
+	info.upscaling = wivrn::upscaling_mode::sgsr1;
+	info.meta_compositor_available = true;
+	info.render_eye_width = 2000;
+	info.render_eye_height = 2000;
+	info.target_eye_width = 2020;
+	info.target_eye_height = 2020;
+	auto selection = wivrn::select_upscaling(info);
+	check(selection.effective == wivrn::upscaling_mode::meta_compositor);
+	check(selection.fallback_reason == wivrn::runtime_fallback_reason::upscale_below_threshold);
+
+	// 100/100 and 80/80 likewise avoid a reconstruction pass.
+	info.target_eye_width = 2000;
+	info.target_eye_height = 2000;
+	selection = wivrn::select_upscaling(info);
+	check(selection.effective == wivrn::upscaling_mode::meta_compositor);
+	info.render_eye_width = 1600;
+	info.render_eye_height = 1600;
+	info.target_eye_width = 1600;
+	info.target_eye_height = 1600;
+	selection = wivrn::select_upscaling(info);
+	check(selection.effective == wivrn::upscaling_mode::meta_compositor);
+
+	// 80 -> 100% is large enough for the explicitly selected local path.
+	info.target_eye_width = 2000;
+	info.target_eye_height = 2000;
+	selection = wivrn::select_upscaling(info);
+	check(selection.effective == wivrn::upscaling_mode::sgsr1);
+
+	// FSR beyond its 4x area bound takes the safe compositor route.
+	info.upscaling = wivrn::upscaling_mode::fsr1;
+	info.render_eye_width = 900;
+	info.render_eye_height = 900;
+	info.target_eye_width = 2000;
+	info.target_eye_height = 2200;
+	selection = wivrn::select_upscaling(info);
+	check(selection.effective == wivrn::upscaling_mode::meta_compositor);
+	check(selection.fallback_reason == wivrn::runtime_fallback_reason::unsupported);
+
+	// Unknown runtimes cannot use Meta's filter extension.
+	info.upscaling = wivrn::upscaling_mode::meta_compositor;
+	info.meta_compositor_available = false;
+	selection = wivrn::select_upscaling(info);
+	check(selection.effective == wivrn::upscaling_mode::bilinear);
+	check(selection.fallback_reason == wivrn::runtime_fallback_reason::unsupported);
 }

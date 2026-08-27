@@ -29,6 +29,9 @@
 #include "math/m_vec3.h"
 #include "xrt/xrt_defines.h"
 #include "xrt/xrt_results.h"
+#include <algorithm>
+#include <cinttypes>
+#include <cmath>
 #include <format>
 
 using namespace xrt::auxiliary::math;
@@ -69,9 +72,53 @@ xrt_space_relation tracker_pose_list::extrapolate(const xrt_space_relation & a, 
 	return res;
 }
 
-void tracker_pose_list::update_tracking(XrTime produced_timestamp, XrTime timestamp, const xrt_space_relation & pose, const clock_offset & offset)
+static bool is_usable_tracker_pose(const xrt_space_relation & pose)
 {
-	add_sample(produced_timestamp, timestamp, pose, offset);
+	constexpr auto required_flags = XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_POSITION_VALID_BIT;
+	if ((pose.relation_flags & required_flags) != required_flags)
+		return false;
+
+	return std::isfinite(pose.pose.orientation.x) &&
+	       std::isfinite(pose.pose.orientation.y) &&
+	       std::isfinite(pose.pose.orientation.z) &&
+	       std::isfinite(pose.pose.orientation.w) &&
+	       std::isfinite(pose.pose.position.x) &&
+	       std::isfinite(pose.pose.position.y) &&
+	       std::isfinite(pose.pose.position.z);
+}
+
+virtual_tracker_dropout_filter::result
+tracker_pose_list::update_tracking(XrTime produced_timestamp, XrTime timestamp, const xrt_space_relation & pose, const clock_offset & offset)
+{
+	std::lock_guard lock(update_mutex);
+	auto result = dropout_filter.update(produced_timestamp, is_usable_tracker_pose(pose));
+
+	switch (result.next_action)
+	{
+		case virtual_tracker_dropout_filter::action::accept_valid:
+			add_sample(produced_timestamp, timestamp, pose, offset);
+			break;
+		case virtual_tracker_dropout_filter::action::publish_invalid:
+			replace_sample(produced_timestamp, timestamp, {}, offset);
+			break;
+		case virtual_tracker_dropout_filter::action::recover:
+			// Do not interpolate recovery against the deliberately invalid sample.
+			replace_sample(produced_timestamp, timestamp, pose, offset);
+			break;
+		case virtual_tracker_dropout_filter::action::suppress_invalid:
+		case virtual_tracker_dropout_filter::action::maintain_invalid:
+		case virtual_tracker_dropout_filter::action::wait_for_valid:
+		case virtual_tracker_dropout_filter::action::ignore_reordered:
+			break;
+	}
+	return result;
+}
+
+void tracker_pose_list::reset_tracking()
+{
+	std::lock_guard lock(update_mutex);
+	dropout_filter.reset();
+	history<tracker_pose_list, xrt_space_relation>::reset();
 }
 
 wivrn_generic_tracker::wivrn_generic_tracker(std::string name, xrt_device * hmd, wivrn_session & cnx) :
@@ -108,6 +155,24 @@ wivrn_generic_tracker::wivrn_generic_tracker(std::string name, xrt_device * hmd,
 	input_count = 1;
 }
 
+wivrn_generic_tracker::~wivrn_generic_tracker()
+{
+	if (invalid_samples_suppressed || transient_dropouts || sustained_dropouts || recoveries || reordered_samples)
+	{
+		U_LOG_I("Virtual tracker %s summary: suppressed_invalid_samples=%" PRIu64
+		        ", transient_dropouts=%" PRIu64 ", sustained_dropouts=%" PRIu64
+		        ", recoveries=%" PRIu64 ", reordered_samples=%" PRIu64
+		        ", maximum_invalid_gap=%" PRIi64 "ms",
+		        serial,
+		        invalid_samples_suppressed,
+		        transient_dropouts,
+		        sustained_dropouts,
+		        recoveries,
+		        reordered_samples,
+		        maximum_invalid_duration / 1'000'000);
+	}
+}
+
 xrt_result_t wivrn_generic_tracker::update_inputs()
 {
 	return XRT_SUCCESS;
@@ -137,12 +202,58 @@ xrt_result_t wivrn_generic_tracker::get_tracked_pose(xrt_input_name name, int64_
 
 void wivrn_generic_tracker::update_tracking(XrTime produced_timestamp, XrTime timestamp, const xrt_space_relation & pose, const clock_offset & offset)
 {
-	poses.update_tracking(produced_timestamp, timestamp, pose, offset);
+	auto result = poses.update_tracking(produced_timestamp, timestamp, pose, offset);
+	maximum_invalid_duration = std::max(maximum_invalid_duration, XrDuration(result.invalid_duration_ns));
+
+	switch (result.next_action)
+	{
+		case virtual_tracker_dropout_filter::action::accept_valid:
+			if (result.invalid_duration_ns)
+			{
+				transient_dropouts++;
+				U_LOG_D("Virtual tracker %s suppressed a %" PRIi64 "ms tracking dropout",
+				        serial,
+				        result.invalid_duration_ns / 1'000'000);
+			}
+			break;
+		case virtual_tracker_dropout_filter::action::suppress_invalid:
+			invalid_samples_suppressed++;
+			break;
+		case virtual_tracker_dropout_filter::action::publish_invalid:
+			sustained_dropouts++;
+			U_LOG_W("Virtual tracker %s lost tracking for %" PRIi64 "ms; publishing untracked state",
+			        serial,
+			        result.invalid_duration_ns / 1'000'000);
+			break;
+		case virtual_tracker_dropout_filter::action::recover:
+			recoveries++;
+			U_LOG_I("Virtual tracker %s recovered after %" PRIi64 "ms",
+			        serial,
+			        result.invalid_duration_ns / 1'000'000);
+			break;
+		case virtual_tracker_dropout_filter::action::ignore_reordered:
+			reordered_samples++;
+			break;
+		case virtual_tracker_dropout_filter::action::maintain_invalid:
+		case virtual_tracker_dropout_filter::action::wait_for_valid:
+			break;
+	}
 }
 
 void wivrn_generic_tracker::set_enabled(bool enabled)
 {
-	if (this->enabled.exchange(enabled, std::memory_order_acq_rel) != enabled)
-		U_LOG_I("Virtual tracker %s %s", serial, enabled ? "enabled" : "disabled");
+	if (this->enabled.load(std::memory_order_acquire) == enabled)
+		return;
+
+	// Keep stale poses inaccessible while the history and grace state are reset.
+	this->enabled.store(false, std::memory_order_release);
+	poses.reset_tracking();
+	this->enabled.store(enabled, std::memory_order_release);
+	U_LOG_I("Virtual tracker %s %s", serial, enabled ? "enabled" : "disabled");
+}
+
+void wivrn_generic_tracker::reset_tracking()
+{
+	poses.reset_tracking();
 }
 } // namespace wivrn

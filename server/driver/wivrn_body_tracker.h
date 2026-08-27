@@ -26,6 +26,7 @@
 #include "xrt/xrt_device.h"
 
 #include "history.h"
+#include "fbt_supervisor.h"
 #include "pose_list.h"
 #include "wivrn_packets.h"
 
@@ -63,6 +64,17 @@ class wivrn_body_tracker : public xrt_device
 
 	thread_safe<xrt_body_skeleton> meta_skeleton;
 	std::atomic_uint32_t meta_skeleton_generation;
+	std::vector<fbt_supervisor> joint_supervisors;
+	from_headset::body_tracking_settings body_settings{};
+	from_headset::body_tracking_calibration_state calibration_state = from_headset::body_tracking_calibration_state::unknown;
+	from_headset::body_tracking_fidelity effective_fidelity = from_headset::body_tracking_fidelity::automatic;
+	bool supervisor_configured = false;
+	bool body_active = false;
+
+	uint32_t joint_count() const;
+	bool is_foot_joint(uint32_t joint) const;
+	xrt_space_relation supervise_joint(uint32_t joint, int64_t timestamp_ns, const xrt_space_relation & relation, float confidence);
+	void configure_supervisors(const from_headset::body_tracking_settings & settings);
 
 protected:
 	// key is joint
@@ -81,6 +93,8 @@ public:
 	void update_tracking(const from_headset::meta_body &, const clock_offset &);
 	void update_tracking(const from_headset::bd_body &, const clock_offset &);
 	void update_skeleton(const from_headset::meta_body_skeleton &);
+	void reset_tracking();
+	to_headset::body_tracking_status status(uint64_t body_epoch, uint64_t connection_generation) const;
 
 	void operator()(const from_headset::settings_changed & settings);
 };

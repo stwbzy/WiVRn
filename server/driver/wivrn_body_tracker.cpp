@@ -30,6 +30,9 @@
 
 #include "xrt/xrt_defines.h"
 #include "xrt/xrt_results.h"
+#include <algorithm>
+#include <cmath>
+#include <magic_enum.hpp>
 #include <unordered_map>
 
 static_assert(std::to_underlying(XR_BODY_JOINT_COUNT_FB) == std::to_underlying(XRT_BODY_JOINT_COUNT_FB));
@@ -84,6 +87,122 @@ static inline bool is_joint_set_active(wivrn::from_headset::body_type body_type,
 			assert(false);
 			__builtin_unreachable();
 	}
+}
+
+static bool relation_is_valid(const xrt_space_relation & relation)
+{
+	constexpr auto required = XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_POSITION_VALID_BIT;
+	return (relation.relation_flags & required) == required;
+}
+
+static bool same_body_settings(const wivrn::from_headset::body_tracking_settings & a,
+                               const wivrn::from_headset::body_tracking_settings & b)
+{
+	return a.profile == b.profile && a.fidelity == b.fidelity &&
+	       a.calibration_mode == b.calibration_mode && a.supervisor == b.supervisor &&
+	       a.supervisor_path == b.supervisor_path &&
+	       a.smoothing_position_permille == b.smoothing_position_permille &&
+	       a.smoothing_rotation_permille == b.smoothing_rotation_permille &&
+	       a.confidence_threshold_permille == b.confidence_threshold_permille &&
+	       a.dropout_hold_ms == b.dropout_hold_ms && a.recovery_samples == b.recovery_samples &&
+	       a.prediction_ms == b.prediction_ms && a.body_height_mm == b.body_height_mm &&
+	       a.floor_assist == b.floor_assist;
+}
+
+static wivrn::fbt_supervisor_config supervisor_config(const wivrn::from_headset::body_tracking_settings & settings)
+{
+	wivrn::fbt_supervisor_config result{};
+	switch (settings.profile)
+	{
+		case wivrn::body_tracking_profile::stable:
+			result.minimum_confidence = 0.60f;
+			result.hold_duration_ns = 180'000'000;
+			result.hard_loss_duration_ns = 700'000'000;
+			result.recovery_samples = 5;
+			result.max_linear_speed_m_s = 6.0f;
+			result.max_angular_speed_rad_s = 15.0f;
+			result.smoothing_alpha = 0.22f;
+			break;
+		case wivrn::body_tracking_profile::balanced:
+			break;
+		case wivrn::body_tracking_profile::responsive:
+			result.minimum_confidence = 0.35f;
+			result.hold_duration_ns = 60'000'000;
+			result.hard_loss_duration_ns = 350'000'000;
+			result.recovery_samples = 2;
+			result.max_linear_speed_m_s = 12.0f;
+			result.max_angular_speed_rad_s = 30.0f;
+			result.smoothing_alpha = 0.65f;
+			break;
+		case wivrn::body_tracking_profile::custom:
+		{
+			result.minimum_confidence = std::clamp(settings.confidence_threshold_permille / 1000.0f, 0.0f, 1.0f);
+			result.hold_duration_ns = int64_t(settings.dropout_hold_ms) * 1'000'000;
+			result.hard_loss_duration_ns = std::max<int64_t>(500'000'000, result.hold_duration_ns * 5);
+			result.recovery_samples = std::max<uint32_t>(1, settings.recovery_samples);
+			const float smoothing = (settings.smoothing_position_permille + settings.smoothing_rotation_permille) / 2000.0f;
+			result.smoothing_alpha = std::clamp(1.0f - smoothing, 0.08f, 0.98f);
+			break;
+		}
+	}
+
+	// The raw path still validates, holds and recovers, but does not alter an
+	// accepted relation. The filtered path applies the adaptive one-pole filter.
+	result.smoothing_enabled = settings.supervisor_path == wivrn::body_tracking_supervisor_path::filtered;
+	return result;
+}
+
+static wivrn::body_tracking_supervisor_state protocol_state(wivrn::fbt_supervisor_state state)
+{
+	switch (state)
+	{
+		case wivrn::fbt_supervisor_state::warming_up:
+			return wivrn::body_tracking_supervisor_state::warming_up;
+		case wivrn::fbt_supervisor_state::tracking:
+			return wivrn::body_tracking_supervisor_state::tracking;
+		case wivrn::fbt_supervisor_state::holding:
+			return wivrn::body_tracking_supervisor_state::holding;
+		case wivrn::fbt_supervisor_state::lost:
+			return wivrn::body_tracking_supervisor_state::lost;
+		case wivrn::fbt_supervisor_state::recovering:
+			return wivrn::body_tracking_supervisor_state::recovering;
+	}
+	return wivrn::body_tracking_supervisor_state::lost;
+}
+
+static wivrn::body_tracking_supervisor_reason protocol_reason(wivrn::fbt_supervisor_reason reason)
+{
+	switch (reason)
+	{
+		case wivrn::fbt_supervisor_reason::none:
+		case wivrn::fbt_supervisor_reason::accepted:
+		case wivrn::fbt_supervisor_reason::warming_up:
+		case wivrn::fbt_supervisor_reason::recovery_pending:
+		case wivrn::fbt_supervisor_reason::recovered:
+			return wivrn::body_tracking_supervisor_reason::none;
+		case wivrn::fbt_supervisor_reason::reordered_timestamp:
+			return wivrn::body_tracking_supervisor_reason::reordered;
+		case wivrn::fbt_supervisor_reason::low_confidence:
+		case wivrn::fbt_supervisor_reason::invalid_confidence:
+			return wivrn::body_tracking_supervisor_reason::low_confidence;
+		case wivrn::fbt_supervisor_reason::excessive_linear_velocity:
+			return wivrn::body_tracking_supervisor_reason::excessive_velocity;
+		case wivrn::fbt_supervisor_reason::excessive_angular_velocity:
+			return wivrn::body_tracking_supervisor_reason::excessive_angular_velocity;
+		case wivrn::fbt_supervisor_reason::held_dropout:
+		case wivrn::fbt_supervisor_reason::hold_expired:
+		case wivrn::fbt_supervisor_reason::hard_loss:
+			return wivrn::body_tracking_supervisor_reason::dropout;
+		case wivrn::fbt_supervisor_reason::reset:
+			return wivrn::body_tracking_supervisor_reason::reset;
+		case wivrn::fbt_supervisor_reason::invalid_timestamp:
+		case wivrn::fbt_supervisor_reason::invalid_flags:
+		case wivrn::fbt_supervisor_reason::non_finite:
+		case wivrn::fbt_supervisor_reason::invalid_quaternion:
+		case wivrn::fbt_supervisor_reason::count:
+			return wivrn::body_tracking_supervisor_reason::invalid_pose;
+	}
+	return wivrn::body_tracking_supervisor_reason::internal_error;
 }
 
 template <typename T>
@@ -174,49 +293,59 @@ void body_joints_list::update_tracking(const wivrn::from_headset::meta_body & tr
 	        .base_body_joint_set_meta = {
 	                .sample_time_ns = tracking.timestamp,
 	                .confidence = tracking.confidence,
-	                .is_active = not std::holds_alternative<std::monostate>(tracking.joints),
+	                .is_active = false,
 	        },
+	};
+	const bool calibration_blocks_output =
+	        tracking.calibration_state == body_tracking_calibration_state::invalid ||
+	        tracking.calibration_state == body_tracking_calibration_state::calibrating;
+	bool any_valid = false;
+	auto publish_joint = [&](uint32_t joint, xrt_space_relation pose) {
+		// META explicitly defines calibrating/invalid poses as unsafe. Do not let
+		// either the supervisor hold path or the unsupervised path publish them.
+		if (calibration_blocks_output)
+			pose = xrt_space_relation XRT_SPACE_RELATION_ZERO;
+		else
+			pose = parent.supervise_joint(joint, tracking.timestamp, pose, tracking.confidence);
+		s.full_body_joint_set_meta.joint_locations[joint].relation = pose;
+		any_valid = any_valid || relation_is_valid(pose);
+
+		if (auto it = parent.virtual_trackers.find(joint); it != parent.virtual_trackers.cend())
+		{
+			auto & tracker = it->second;
+			if (calibration_blocks_output)
+			{
+				// The generic-trackers' grace filter is correct for ordinary packet
+				// dropout, but calibration invalidation must be immediate.
+				tracker.reset_tracking();
+				return;
+			}
+			// Quest frequently reports VALID without TRACKED. Virtual tracker
+			// consumers expect both for a usable supervised pose.
+			std::underlying_type_t<xrt_space_relation_flags> flags = pose.relation_flags;
+			if (flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT)
+				flags |= XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT;
+			if (flags & XRT_SPACE_RELATION_POSITION_VALID_BIT)
+				flags |= XRT_SPACE_RELATION_POSITION_TRACKED_BIT;
+			pose.relation_flags = static_cast<xrt_space_relation_flags>(flags);
+			tracker.update_tracking(tracking.production_timestamp, tracking.timestamp, pose, offset);
+		}
 	};
 	std::visit(utils::overloaded{
 	                   [&](std::monostate) {
-		                   for (auto & [_, tracker]: parent.virtual_trackers)
-		                   {
-			                   tracker.update_tracking(tracking.production_timestamp, tracking.timestamp, {}, offset);
-		                   }
+		                   for (uint32_t joint = 0; joint < parent.joint_count(); ++joint)
+			                   publish_joint(joint, {});
 	                   },
 	                   [&](auto & joints) {
-		                   s.body_joint_set_fb.joint_locations[XRT_BODY_JOINT_ROOT_FB].relation = to_relation(joints.root);
+		                   publish_joint(XRT_BODY_JOINT_ROOT_FB, to_relation(joints.root));
 		                   for (size_t joint = XRT_BODY_JOINT_HIPS_FB; joint < std::size(joints.joints) + 1; joint++)
 		                   {
-			                   const auto pose = to_relation(joints.root, joints.joints[joint - 1]);
-			                   static_assert(offsetof(xrt_full_body_joint_set_meta, joint_locations) == offsetof(xrt_body_joint_set_fb, joint_locations));
-			                   static_assert(sizeof(xrt_full_body_joint_set_meta::joint_locations[0]) == sizeof(xrt_body_joint_set_fb::joint_locations[0]));
-			                   s.full_body_joint_set_meta.joint_locations[joint].relation = pose;
-
-			                   if (auto it = parent.virtual_trackers.find(joint); it != parent.virtual_trackers.cend())
-			                   {
-				                   const auto body_part = parent.joint_body_parts.at(joint);
-				                   auto & tracker = it->second;
-
-				                   // Quest reports VALID bit not TRACKED bit, make sure TRACKED is set when VALID
-				                   // on the virtual trackers to appease the SolarXR driver and other apps
-				                   std::underlying_type_t<xrt_space_relation_flags> flags = pose.relation_flags;
-				                   if (flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT)
-					                   flags |= XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT;
-				                   if (flags & XRT_SPACE_RELATION_POSITION_VALID_BIT)
-					                   flags |= XRT_SPACE_RELATION_POSITION_TRACKED_BIT;
-				                   const xrt_space_relation virtual_tracker_pose{
-				                           .relation_flags = static_cast<xrt_space_relation_flags>(flags),
-				                           .pose = pose.pose,
-				                           .linear_velocity = pose.linear_velocity,
-				                           .angular_velocity = pose.angular_velocity,
-				                   };
-
-				                   tracker.update_tracking(tracking.production_timestamp, tracking.timestamp, virtual_tracker_pose, offset);
-			                   }
+			                   publish_joint(joint, to_relation(joints.root, joints.joints[joint - 1]));
 		                   }
 	                   }},
 	           tracking.joints);
+	s.base_body_joint_set_meta.is_active = any_valid;
+	parent.body_active = any_valid;
 
 	add_sample(tracking.production_timestamp, tracking.timestamp, s, offset);
 }
@@ -227,24 +356,97 @@ void body_joints_list::update_tracking(const wivrn::from_headset::bd_body & trac
 	xrt_body_joint_set s{
 	        .body_joint_set_bd = {
 	                .sample_time_ns = tracking.timestamp,
-	                .is_active = true, // FIXME: what is this supposed to be?
+	                .is_active = false,
 	                .all_joint_poses_tracked = tracking.all_tracked,
 	        },
 	};
+	bool any_valid = false;
 	for (size_t joint = XRT_BODY_JOINT_PELVIS_BD; joint < XRT_BODY_JOINT_COUNT_BD; joint++)
 	{
-		const auto pose = to_relation(tracking.joints[joint]);
+		const auto pose = parent.supervise_joint(joint, tracking.timestamp, to_relation(tracking.joints[joint]), 1.0f);
 		s.body_joint_set_bd.joint_locations[joint].relation = pose;
+		any_valid = any_valid || relation_is_valid(pose);
 
 		if (auto it = parent.virtual_trackers.find(joint); it != parent.virtual_trackers.cend())
 		{
-			const auto body_part = parent.joint_body_parts.at(joint);
 			auto & tracker = it->second;
 			tracker.update_tracking(tracking.production_timestamp, tracking.timestamp, pose, offset);
 		}
 	}
+	s.body_joint_set_bd.is_active = any_valid;
+	parent.body_active = any_valid;
 
 	add_sample(tracking.production_timestamp, tracking.timestamp, s, offset);
+}
+
+uint32_t wivrn_body_tracker::joint_count() const
+{
+	switch (cnx.get_info().body_tracking)
+	{
+		case from_headset::body_type::fb:
+			return XRT_BODY_JOINT_COUNT_FB;
+		case from_headset::body_type::meta:
+			return XRT_FULL_BODY_JOINT_COUNT_META;
+		case from_headset::body_type::bd:
+			return XRT_BODY_JOINT_COUNT_BD;
+		default:
+			return 0;
+	}
+}
+
+bool wivrn_body_tracker::is_foot_joint(uint32_t joint) const
+{
+	switch (cnx.get_info().body_tracking)
+	{
+		case from_headset::body_type::meta:
+			return joint == XRT_FULL_BODY_JOINT_LEFT_FOOT_TRANSVERSE_META ||
+			       joint == XRT_FULL_BODY_JOINT_RIGHT_FOOT_TRANSVERSE_META;
+		case from_headset::body_type::bd:
+			return joint == XRT_BODY_JOINT_LEFT_FOOT_BD || joint == XRT_BODY_JOINT_RIGHT_FOOT_BD;
+		case from_headset::body_type::fb:
+		default:
+			return false;
+	}
+}
+
+xrt_space_relation wivrn_body_tracker::supervise_joint(uint32_t joint,
+	                                                    int64_t timestamp_ns,
+	                                                    const xrt_space_relation & relation,
+	                                                    float confidence)
+{
+	if (body_settings.supervisor == body_tracking_supervisor::off || joint >= joint_supervisors.size())
+		return relation;
+	auto output = joint_supervisors[joint].update(timestamp_ns, relation, confidence).relation;
+	if (!relation_is_valid(output))
+		return output;
+
+	if (body_settings.prediction_ms > 0 &&
+	    (output.relation_flags & XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT) != 0)
+	{
+		const float seconds = body_settings.prediction_ms / 1000.0f;
+		output.pose.position.x += output.linear_velocity.x * seconds;
+		output.pose.position.y += output.linear_velocity.y * seconds;
+		output.pose.position.z += output.linear_velocity.z * seconds;
+	}
+
+	// The body is located in WiVRn's floor-relative world space. Floor assist
+	// only prevents a tracked foot from sinking below that plane; it never pins
+	// a lifted foot or fabricates a missing relation.
+	if (body_settings.floor_assist && is_foot_joint(joint) && output.pose.position.y < 0.0f)
+		output.pose.position.y = 0.0f;
+	return output;
+}
+
+void wivrn_body_tracker::configure_supervisors(const from_headset::body_tracking_settings & settings)
+{
+	body_settings = settings;
+	joint_supervisors.clear();
+	joint_supervisors.reserve(joint_count());
+	const auto config = supervisor_config(settings);
+	for (uint32_t joint = 0; joint < joint_count(); ++joint)
+		joint_supervisors.emplace_back(config);
+	supervisor_configured = true;
+	reset_tracking();
 }
 
 wivrn_body_tracker::wivrn_body_tracker(xrt_device * hmd, wivrn::wivrn_session & cnx, std::function<void(xrt_device &)> device_add_callback) :
@@ -373,11 +575,18 @@ xrt_result_t wivrn_body_tracker::get_body_joints(xrt_input_name body_tracking_ty
 
 	XrTime production_timestamp;
 	std::tie(production_timestamp, *out_value) = joints_list.get_at(at_timestamp_ns);
-	out_value->body_pose = xrt_space_relation{
-	        .relation_flags = xrt_space_relation_flags(XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_POSITION_VALID_BIT |
-	                                                   XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT | XRT_SPACE_RELATION_POSITION_TRACKED_BIT),
-	        .pose = XRT_POSE_IDENTITY,
-	};
+	if (is_joint_set_active(cnx.get_info().body_tracking, *out_value))
+	{
+		out_value->body_pose = xrt_space_relation{
+		        .relation_flags = xrt_space_relation_flags(XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_POSITION_VALID_BIT |
+		                                                   XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT | XRT_SPACE_RELATION_POSITION_TRACKED_BIT),
+		        .pose = XRT_POSE_IDENTITY,
+		};
+	}
+	else
+	{
+		out_value->body_pose = {};
+	}
 
 	if (body_tracking_type == XRT_INPUT_FB_BODY_TRACKING or body_tracking_type == XRT_INPUT_META_FULL_BODY_TRACKING)
 		out_value->base_body_joint_set_meta.skeleton_changed_count = meta_skeleton_generation;
@@ -388,6 +597,8 @@ xrt_result_t wivrn_body_tracker::get_body_joints(xrt_input_name body_tracking_ty
 
 void wivrn_body_tracker::update_tracking(const from_headset::meta_body & tracking, const clock_offset & offset)
 {
+	calibration_state = tracking.calibration_state;
+	effective_fidelity = tracking.fidelity;
 	joints_list.update_tracking(tracking, offset);
 }
 void wivrn_body_tracker::update_tracking(const from_headset::bd_body & tracking, const clock_offset & offset)
@@ -417,8 +628,81 @@ void wivrn_body_tracker::update_skeleton(const from_headset::meta_body_skeleton 
 	meta_skeleton_generation++;
 }
 
+void wivrn_body_tracker::reset_tracking()
+{
+	joints_list.reset();
+	for (auto & supervisor: joint_supervisors)
+		supervisor.reset();
+	for (auto & [_, tracker]: virtual_trackers)
+		tracker.reset_tracking();
+	body_active = false;
+}
+
+to_headset::body_tracking_status wivrn_body_tracker::status(uint64_t body_epoch, uint64_t connection_generation) const
+{
+	to_headset::body_tracking_status result{
+	        .profile = body_settings.profile,
+	        .fidelity = effective_fidelity,
+	        .calibration_state = calibration_state,
+	        .supervisor = body_settings.supervisor,
+	        .supervisor_state = body_settings.supervisor == body_tracking_supervisor::off
+	                                    ? body_tracking_supervisor_state::disabled
+	                                    : body_tracking_supervisor_state::tracking,
+	        .supervisor_reason = body_tracking_supervisor_reason::none,
+	        .active = body_active,
+	        .body_epoch = body_epoch,
+	        .connection_generation = connection_generation,
+	};
+
+	auto severity = [](body_tracking_supervisor_state state) {
+		switch (state)
+		{
+			case body_tracking_supervisor_state::disabled: return 0;
+			case body_tracking_supervisor_state::tracking: return 1;
+			case body_tracking_supervisor_state::warming_up: return 2;
+			case body_tracking_supervisor_state::recovering: return 3;
+			case body_tracking_supervisor_state::holding: return 4;
+			case body_tracking_supervisor_state::lost: return 5;
+		}
+		return 5;
+	};
+
+	if (body_settings.supervisor != body_tracking_supervisor::off)
+	{
+		for (const auto & supervisor: joint_supervisors)
+		{
+			const auto & metrics = supervisor.metrics();
+			result.accepted += metrics.accepted_samples;
+			result.rejected += metrics.rejected_samples;
+			result.held += metrics.held_samples;
+			const auto state = protocol_state(supervisor.current_state());
+			if (severity(state) > severity(result.supervisor_state))
+			{
+				result.supervisor_state = state;
+				result.supervisor_reason = protocol_reason(metrics.last_reason);
+			}
+			else if (result.supervisor_reason == body_tracking_supervisor_reason::none)
+			{
+				result.supervisor_reason = protocol_reason(metrics.last_reason);
+			}
+		}
+	}
+	if (calibration_state == body_tracking_calibration_state::invalid ||
+	    calibration_state == body_tracking_calibration_state::calibrating)
+		result.supervisor_reason = body_tracking_supervisor_reason::calibration;
+	return result;
+}
+
 void wivrn_body_tracker::operator()(const from_headset::settings_changed & settings)
 {
+	if (!supervisor_configured || !same_body_settings(body_settings, settings.body_tracking))
+	{
+		U_LOG_I("Body tracking policy updated: profile=%s supervisor=%s path=%s",
+		        std::string(magic_enum::enum_name(settings.body_tracking.profile)).c_str(),
+		        std::string(magic_enum::enum_name(settings.body_tracking.supervisor)).c_str(),
+		        std::string(magic_enum::enum_name(settings.body_tracking.supervisor_path)).c_str());
+		configure_supervisors(settings.body_tracking);
+	}
 	U_LOG_I("Virtual body tracker mask updated: 0x%02x", static_cast<unsigned>(settings.enabled_body_parts));
 	for (auto & [joint, tracker]: virtual_trackers)
 	{

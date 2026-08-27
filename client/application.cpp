@@ -1320,7 +1320,9 @@ void application::initialize()
 	        XR_HTC_VIVE_XR_TRACKER_INTERACTION_EXTENSION_NAME,
 
 	        XR_META_BODY_TRACKING_FIDELITY_EXTENSION_NAME,
+	        XR_META_BODY_TRACKING_CALIBRATION_EXTENSION_NAME,
 	        XR_META_BODY_TRACKING_FULL_BODY_EXTENSION_NAME,
+	        XR_META_AUTOMATIC_LAYER_FILTER_EXTENSION_NAME,
 	        XR_META_LOCAL_DIMMING_EXTENSION_NAME,
 	};
 
@@ -1376,6 +1378,11 @@ void application::initialize()
 	{
 		spdlog::info("    OpenXR post-processing extension support: true");
 		openxr_post_processing_supported = true;
+	}
+	if (xr_instance.has_extension(XR_META_AUTOMATIC_LAYER_FILTER_EXTENSION_NAME))
+	{
+		spdlog::info("    Meta automatic layer filter support: true");
+		automatic_layer_filter_supported = true;
 	}
 
 	switch (xr_system_id.passthrough_supported())

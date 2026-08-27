@@ -45,8 +45,9 @@ class stream_defoveator
 		vk::raii::PipelineLayout layout = nullptr;
 		vk::raii::Pipeline pipeline = nullptr;
 	};
-	pipeline_t pipeline_rgb[view_count];
-	pipeline_t pipeline_a[view_count];
+	// [view][0: fused bilinear, 1: SGSR1 mobile]
+	pipeline_t pipeline_rgb[view_count][2];
+	pipeline_t pipeline_a[view_count][2];
 
 	// Destination images
 	std::vector<vk::Image> output_images;
@@ -57,7 +58,7 @@ class stream_defoveator
 	void ensure_vertices(size_t num_vertices);
 	vertex * get_vertices(size_t view);
 
-	pipeline_t & ensure_pipeline(size_t view, vk::Sampler rgb, vk::Sampler a);
+	pipeline_t & ensure_pipeline(size_t view, vk::Sampler rgb, vk::Sampler a, bool sgsr);
 
 public:
 	struct input
@@ -89,7 +90,9 @@ public:
 	        const std::array<input, 2> & inputs,
 	        std::array<float, 4> scale,
 	        std::array<float, 4> bias,
-	        int destination);
+	        int destination,
+	        const std::array<XrExtent2Di, 2> & output_sizes,
+	        wivrn::upscaling_mode mode);
 
 	static XrExtent2Di defoveated_size(const wivrn::to_headset::foveation_parameter &);
 };

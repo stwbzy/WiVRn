@@ -173,27 +173,32 @@ void hmd_traits::init()
 
 		if (device == "monterey") // Quest 1
 		{
+			performance_profile = hmd_performance_profile::quest_legacy;
 			panel_width_override = 1440;
 			controller_profile = "oculus-touch-v2";
 			vk_debug_ext_allowed = false; // Quest 1 lies, the extension won't load
 		}
 		else if (device == "hollywood") // Quest 2
 		{
+			performance_profile = hmd_performance_profile::quest_legacy;
 			panel_width_override = 1832;
 			controller_profile = "oculus-touch-v3";
 		}
 		else if (device == "seacliff")
 		{
+			performance_profile = hmd_performance_profile::quest_modern;
 			panel_width_override = 1800; // Quest pro
 			controller_profile = "meta-quest-touch-pro";
 		}
 		else if (device == "eureka")
 		{
+			performance_profile = hmd_performance_profile::quest_modern;
 			panel_width_override = 2064; // Quest 3
 			controller_profile = "meta-quest-touch-plus";
 		}
 		else if (device == "panther") // Quest 3S
 		{
+			performance_profile = hmd_performance_profile::quest_modern;
 			panel_width_override = 1832;
 			controller_profile = "meta-quest-touch-plus";
 		}
@@ -296,6 +301,16 @@ void hmd_traits::init()
 	boost::pfr::for_each_field_with_name(
 	        *this,
 	        utils::overloaded{
+	                [](std::string_view name, hmd_performance_profile & field) {
+		                if (auto value = env<std::string>(name))
+		                {
+			                if (auto parsed = magic_enum::enum_cast<hmd_performance_profile>(*value))
+				                field = *parsed;
+			                else
+				                spdlog::warn("HMD performance profile '{}' not recognized", *value);
+		                }
+		                spdlog::info("\t{}: {}", name, magic_enum::enum_name(field));
+	                },
 	                [](std::string_view name, auto & field) {
 		                if (auto val = env<std::remove_cvref_t<decltype(field)>>(name))
 		                {

@@ -1,11 +1,8 @@
 #version 450
 
-// Experimental server-side frame-synthesis candidate.
-//
-// The first connected backend uses the previous composed frame as history and
-// warps it with the application's motion/depth metadata. The caller owns the
-// explicit image-layout transitions and only consumes the output after a
-// complete dispatch. Handoff to the encoder remains a separate pacing step.
+// Server-side runtime ASW. The input is the latest real composed frame; the
+// optical-flow field points back to the preceding real frame. Extrapolation
+// predicts the next display interval without relying on game metadata.
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -79,10 +76,10 @@ void main()
                      sourceDepth >= constants.minDepth &&
                      sourceDepth <= constants.maxDepth;
     }
-    // Do not clamp an out-of-view reprojection to the border texel: that
-    // stretches the front-facing image into the missing region.  The client
-    // expects this part of the candidate to remain black, just like a normal
-    // frame with no valid pixels for the new view direction.
-    vec4 color = insideSource && validDepth ? texture(historyFrame, sourceUv) : vec4(0.0);
+    // Low confidence, a scene cut, or an out-of-view prediction falls back to
+    // the latest real frame. The headset compositor can still apply ATW to
+    // this conservative repeat; it is preferable to a torn synthetic image.
+    vec4 color = insideSource && validDepth ? texture(historyFrame, sourceUv)
+                                           : texture(historyFrame, uv);
     imageStore(outputFrame, pixel, color);
 }

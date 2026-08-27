@@ -134,6 +134,7 @@ private:
 	bool eye_gaze_supported = false;
 
 	bool openxr_post_processing_supported = false;
+	bool automatic_layer_filter_supported = false;
 
 	bool session_running = false;
 	bool session_focused = false;
@@ -416,6 +417,11 @@ public:
 	static bool get_openxr_post_processing_supported()
 	{
 		return instance().openxr_post_processing_supported;
+	}
+
+	static bool get_automatic_layer_filter_supported()
+	{
+		return instance().automatic_layer_filter_supported;
 	}
 
 	static const hmd_traits & get_hmd_traits()

@@ -364,6 +364,7 @@ void scenes::stream::gui_performance_metrics()
 void scenes::stream::gui_compact_view()
 {
 	const auto & metrics = global_metrics[(metrics_offset + global_metrics.size() - 1) % global_metrics.size()];
+	const auto telemetry = *server_runtime_telemetry.lock();
 
 	if (ImGui::BeginTable("metrics", 2))
 	{
@@ -374,6 +375,13 @@ void scenes::stream::gui_compact_view()
 			ImGui::TableNextColumn();
 			ImGui::Text("%.1f %s", value, unit);
 		};
+		auto text = [&](const char * label, std::string_view value) {
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn();
+			ImGui::Text("%s", label);
+			ImGui::TableNextColumn();
+			ImGui::TextUnformatted(value.data(), value.data() + value.size());
+		};
 
 		f(_S("Download"), 8 * compact_bandwidth_rx * 1e-6, "Mbit/s");
 		f(_S("Upload"), 8 * compact_bandwidth_tx * 1e-6, "Mbit/s");
@@ -382,6 +390,45 @@ void scenes::stream::gui_compact_view()
 		f(_S("Motion to photon latency"),
 		  tracking_control.lock()->motions_to_photons / 1'000'000.f,
 		  "ms");
+		text(_S("Defoveation"), _("Fused client pass"));
+		text(_S("Local scaling"), magic_enum::enum_name(effective_upscaling.load()));
+		text(_S("Compositor filter"),
+		     effective_upscaling.load() == upscaling_mode::meta_compositor
+		             ? (application::get_automatic_layer_filter_supported() ? _("Meta automatic") : _("Meta layer settings"))
+		             : _("Disabled"));
+		text(_S("Frames (real / synthetic)"),
+		     fmt::format("{} / {}", real_frame_count.load(), synthetic_frame_count.load()));
+		text(_S("Synthesis backend"), magic_enum::enum_name(telemetry.effective_frame_synthesis_backend));
+		f(_S("Headset synthesis cost"), headset_synthesis_gpu_time.load() * 1000, "ms");
+		text(_S("Headset frames (real / generated / pose-only / rejected)"),
+		     fmt::format("{} / {} / {} / {}",
+		                  headset_real_frame_count.load(),
+		                  headset_generated_frame_count.load(),
+		                  headset_pose_only_frame_count.load(),
+		                  headset_rejected_frame_count.load()));
+		f(_S("Optical flow"), telemetry.optical_flow_ms, "ms");
+		f(_S("Missed intervals"), telemetry.missed_interval_percent, "%");
+		const auto client_fallback = client_scaling_fallback_reason.load();
+		text(_S("Runtime fallback"),
+		     magic_enum::enum_name(client_fallback != runtime_fallback_reason::none
+		                                   ? client_fallback
+		                                   : telemetry.fallback_reason));
+		text(_S("Synthesis fallback"), magic_enum::enum_name(headset_fallback_reason.load()));
+		{
+			const auto body = body_tracking_status.lock();
+			text(_S("Body tracking"),
+			     fmt::format("{} / {} / {}",
+			                 magic_enum::enum_name(body->profile),
+			                 magic_enum::enum_name(body->supervisor_state),
+			                 magic_enum::enum_name(body->supervisor_reason)));
+			text(_S("Body calibration / fidelity"),
+			     fmt::format("{} / {}",
+			                 magic_enum::enum_name(body->calibration_state),
+			                 magic_enum::enum_name(body->fidelity)));
+			text(_S("Body samples (accepted / rejected / held)"),
+			     fmt::format("{} / {} / {}", body->accepted, body->rejected, body->held));
+			text(_S("Body epoch"), fmt::format("{}", body->body_epoch));
+		}
 		ImGui::EndTable();
 	}
 }
@@ -392,11 +439,13 @@ static void send_settings_changed_packet(xr::session & session, wivrn_session * 
 	        from_headset::settings_changed{
 	                .preferred_refresh_rate = config.preferred_refresh_rate,
 	                .minimum_refresh_rate = config.minimum_refresh_rate.value_or(0),
-	                .fps_divider = config.fps_divider,
+	                .frame_synthesis = config.frame_synthesis,
+	                .frame_synthesis_backend = config.frame_synthesis_backend,
 	                .bitrate_bps = config.bitrate_bps,
-	                .mirror_gamepad = config.forward_gamepad,
-	                .enabled_body_parts = config.body_part_mask,
-	        });
+		                .mirror_gamepad = config.forward_gamepad,
+		                .enabled_body_parts = config.body_part_mask,
+		                .body_tracking = config.body_tracking,
+		        });
 }
 
 void scenes::stream::gui_settings(float)
@@ -413,8 +462,12 @@ void scenes::stream::gui_settings(float)
 	        .recommended_height = height,
 	        .in_game = true,
 	        .server_hid_forwarding = hid_forwarding_enabled(),
-	        .on_streaming_changed = [this] { send_settings_changed_packet(session, network_session.get(), application::get_config()); },
-	        .enter_foveation_adjust = [this] { next_gui_status = stream_tab::foveation_settings; },
+		        .on_streaming_changed = [this] { send_settings_changed_packet(session, network_session.get(), application::get_config()); },
+		        .on_body_tracking_changed = [this](const wivrn::body_tracking_settings &) {
+			        apply_body_tracking_settings_requested.store(true, std::memory_order_release); },
+		        .on_body_tracking_reset = [this](wivrn::body_tracking_reset scope) {
+			        request_body_tracking_reset(scope); },
+		        .enter_foveation_adjust = [this] { next_gui_status = stream_tab::foveation_settings; },
 	        .on_foveation_override_changed = [this] {
 		        const auto & config = application::get_config();
 		        override_foveation_enable = config.override_foveation_enable;

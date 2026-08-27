@@ -111,6 +111,7 @@ set_target_properties(wivrn PROPERTIES CXX_VISIBILITY_PRESET hidden)
 file(GLOB LOCAL_SOURCE CONFIGURE_DEPENDS
     "*.cpp"
     "decoder/*.cpp"
+    "frame_synthesis/*.cpp"
     "scenes/*.cpp"
     "utils/*.cpp"
     "vk/*.cpp"
@@ -118,7 +119,18 @@ file(GLOB LOCAL_SOURCE CONFIGURE_DEPENDS
     "render/*.cpp"
 )
 
-file(GLOB_RECURSE VULKAN_SHADERS CONFIGURE_DEPENDS "*.glsl")
+if(WIVRN_BUILD_TEST AND NOT ANDROID)
+    add_executable(qcom-motion-estimator-test
+        frame_synthesis/qcom_motion_estimator_test.cc
+        frame_synthesis/motion_estimator.cpp
+        frame_synthesis/qcom_motion_estimator.cpp
+    )
+    target_compile_features(qcom-motion-estimator-test PRIVATE cxx_std_23)
+    target_include_directories(qcom-motion-estimator-test PRIVATE .)
+    add_test(NAME qcom-motion-estimator-test COMMAND qcom-motion-estimator-test)
+endif()
+
+file(GLOB_RECURSE VULKAN_SHADERS CONFIGURE_DEPENDS "*.glsl" "*.comp")
 target_sources(wivrn PRIVATE ${LOCAL_SOURCE} ${VULKAN_SHADERS})
 wivrn_compile_glsl(wivrn SHADERS ${VULKAN_SHADERS})
 
@@ -248,6 +260,7 @@ file(MAKE_DIRECTORY "${LICENSES_DIR}")
 file(COPY_FILE "${CMAKE_SOURCE_DIR}/COPYING" "${LICENSES_DIR}/WiVRn")
 file(COPY_FILE "${simdjson_SOURCE_DIR}/LICENSE" "${LICENSES_DIR}/simdjson")
 file(COPY_FILE "${CMAKE_SOURCE_DIR}/LICENSE-OFL-1.1" "${LICENSES_DIR}/FontAwesome")
+file(COPY_FILE "${CMAKE_SOURCE_DIR}/LICENSE-SGSR1-BSD-3-Clause" "${LICENSES_DIR}/SGSR1")
 if (OPENXR_SOURCE_DIR)
     file(COPY_FILE "${OPENXR_SOURCE_DIR}/LICENSE" "${LICENSES_DIR}/openxr-loader")
 endif()

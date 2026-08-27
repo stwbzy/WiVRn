@@ -50,7 +50,7 @@ To also instrument Monado under the same switch, use the `server-tracing-monado`
 
 See [profiling](profiling.md) for how to run the server with tracing and capture/analyse traces.
 
-## Stable FSR 1 spatial-upscaling build
+## FSR runtime build
 
 Use the reproducible server preset and keep the generated runtime in the build
 tree:
@@ -58,7 +58,6 @@ tree:
 ```bash
 cmake --preset server-no-system-boost \
   -DWIVRN_BUILD_TEST=ON \
-  -DWIVRN_ENABLE_EXPERIMENTAL_FRAME_GENERATION=OFF \
   -DEigen3_DIR=/home/stwby/Proyectos/deps/eigen-install/share/eigen3/cmake \
   -DCMAKE_PREFIX_PATH=/home/stwby/Proyectos/deps/local
 cmake --build build-server-no-system-boost -j2
@@ -84,9 +83,11 @@ build-server-no-system-boost/server/wivrn-server \
 ```
 
 This is not AMD FidelityFX FSR 3: it is a 32-bit Vulkan port of AMD FSR 1
-EASU/RCAS. The old `WIVRN_FSR_FRAME_GENERATION_*` variables are ignored by the
-default build. See [fsr-frame-generation.md](fsr-frame-generation.md) for the
-FSR-only smoke test, expected logs and stability checklist.
+EASU/RCAS. Frame synthesis is compiled in so that the headset and server can
+negotiate capabilities, but it remains **Off** by default and can be forced
+off for a session with `WIVRN_DISABLE_FRAME_SYNTHESIS=1`. See
+[fsr-frame-generation.md](fsr-frame-generation.md) for the smoke tests,
+expected logs and stability checklist.
 
 ### OpenXR diagnostic harness
 

@@ -19,8 +19,11 @@
 
 #pragma once
 
+#include "wivrn_packets.h"
+
 #include <cstdint>
 #include <functional>
+#include <optional>
 
 class configuration;
 class imgui_context;
@@ -56,6 +59,10 @@ struct settings_context
 
 	// in-stream hooks, empty in the lobby
 	std::function<void()> on_streaming_changed;          // refresh rate / spacewarp / bitrate
+	// Body settings are persisted by the lobby and can optionally be applied to
+	// an active stream by the owner of the network session.
+	std::function<void(const wivrn::body_tracking_settings &)> on_body_tracking_changed;
+	std::function<void(wivrn::body_tracking_reset)> on_body_tracking_reset;
 	std::function<void()> enter_foveation_adjust;        // thumbstick foveation sub-mode
 	std::function<void()> on_foveation_override_changed; // foveation override toggled
 };

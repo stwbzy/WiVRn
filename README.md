@@ -23,22 +23,34 @@ and OpenXR applications.
 - **Refreshed headset UI:** clearer streaming and reconnection states, a safe
   local recovery panel with a countdown, improved settings, and functional
   virtual full-body tracker selection on Quest.
-- **Frame generation paused:** the former stereo color-history and 45-to-90
-  path remains isolated for future repair and is disabled in the default
-  build, so old frame-generation environment variables cannot affect a stable
-  session.
+- **Experimental frame synthesis:** Off/Auto/Always can select the functional
+  Vulkan headset color path or an explicitly selected server-side path. The
+  latter uses portable hierarchical Vulkan optical flow without game motion
+  vectors or depth. Deadline watchdogs return the session to real frames and
+  headset ATW without changing the saved preference.
+- **Client-side SSW-like backend:** a functional, capability-gated Vulkan
+  color-only headset path is documented separately; the optional QCOM
+  EGL/AHardwareBuffer Motion Engine bridge is implemented and probed but does
+  not yet feed the Vulkan warp, and no private Virtual Desktop API is assumed.
 - **FSR 1 image reconstruction:** an opt-in two-pass FidelityFX EASU + RCAS
   path reconstructs a reduced application render to the headset's recommended
   per-eye resolution before WiVRn foveation and encoding.
+- **Quest scaling choices:** separate render and target resolutions support
+  Meta compositor filtering, lightweight mobile SGSR1 and fused bilinear while
+  preserving Native 1:1 as the stable path.
 
 > [!NOTE]
 > This fork does not embed AMD FidelityFX FSR 3. Spatial reconstruction is a
-> 32-bit Vulkan port of the open-source FSR 1 EASU/RCAS algorithms. Frame
-> generation is currently disabled in the default build while its black-screen
-> and cadence issues are repaired.
+> 32-bit Vulkan port of the open-source FSR 1 EASU/RCAS algorithms. Runtime ASW
+> is a separate experimental color-only optical-flow path on the PC; it is not
+> AMD FSR 3 or Meta Application SpaceWarp and remains Off by default. The
+> client-side SSW-like path is a capability-gated experimental Vulkan
+> implementation, not a claim that an undocumented vendor API is available.
 
 See the [connection lifecycle](docs/connection-lifecycle.md),
-[Space Warp and FSR technical status](docs/fsr-frame-generation.md), and
+[Quest scaling and runtime ASW technical status](docs/fsr-frame-generation.md),
+[client-side SSW-like backend](docs/client-side-ssw.md), and
+[full-body tracking (FBT-E)](docs/fbt-e.md),
 [project roadmap](docs/roadmap.md) for details.
 
 # About
@@ -167,18 +179,27 @@ The same overrides should work for other VR applications distributed as Flatpaks
 
 See [building](docs/building.md) for building the [dashboard](docs/building.md#dashboard), [server (PC)](docs/building.md#server-pc), and [client (headset)](docs/building.md#client-headset)
 
-## Experimental FSR 1 spatial-upscaling fork
+## Quest compatibility pre-release
 
-This checkout contains an AMD FidelityFX FSR 1 spatial path: EASU
-reconstructs a reduced render to the headset's recommended resolution and
-RCAS sharpens it before WiVRn foveation/encoding. It is not FSR 3. The PC
-server compiles with `WIVRN_ENABLE_EXPERIMENTAL_FRAME_GENERATION=OFF` by
-default, both FSR shaders validate for Vulkan 1.3, and both local unit tests
-pass. Commands, expected logs, limitations, and the stability checklist are in
-[docs/fsr-frame-generation.md](docs/fsr-frame-generation.md).
+This checkout adds separate game-render and OpenXR target resolutions, a Meta
+compositor route, lightweight Qualcomm SGSR1, the existing FSR1 spatial path,
+and experimental PC-side runtime ASW. Native 1:1 rendering and Off synthesis
+remain the defaults. The client and server report effective modes, timing and
+automatic session fallbacks independently.
 
-The former frame-generation implementation remains in the source tree for
-future repair, but its runtime environment variables are ignored by default.
+Runtime ASW uses portable hierarchical Vulkan optical flow and does not expose
+`XR_FB_space_warp`, require application motion/depth, modify VRChat or reduce
+network bandwidth. Commands, limitations and the physical Quest acceptance
+matrix are in [docs/fsr-frame-generation.md](docs/fsr-frame-generation.md).
+
+The current 36 -> 72 physical result belongs to this experimental server
+backend. `auto` can negotiate the functional Vulkan `headset` color-only
+backend when its client capability is advertised and local timing permits;
+otherwise it remains on real frames plus ATW. The `server` experiment remains
+an explicit backend choice. The optional QCOM EGL/AHardwareBuffer path is
+implemented/probed but is not yet connected to the Vulkan warp. See
+[client-side-ssw.md](docs/client-side-ssw.md) for the backend contract and
+fallback matrix.
 
 The same branch also contains the deterministic connection lifecycle described
 in [docs/connection-lifecycle.md](docs/connection-lifecycle.md). See the

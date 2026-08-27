@@ -22,10 +22,14 @@
 #include "app_launcher.h"
 #include "audio/audio.h"
 #include "decoder/shard_accumulator.h"
+#include "frame_synthesis/motion_estimator.h"
+#include "frame_synthesis_policy.h"
 #include "render/imgui_impl.h"
+#include "scaling_watchdog.h"
 #include "scene.h"
 #include "scenes/input_profile.h"
 #include "stream_defoveator.h"
+#include "stream_synthesizer.h"
 #include "utils/thread_safe.h"
 #include "wifi_lock.h"
 #include "wivrn_client.h"
@@ -91,11 +95,58 @@ private:
 	std::atomic<XrDuration> real_display_period = 0;
 	std::optional<std::thread> tracking_thread;
 
+	struct pending_body_tracking_reset
+	{
+		uint64_t request_id;
+		wivrn::body_tracking_reset scope;
+	};
+	thread_safe<std::queue<pending_body_tracking_reset>> body_tracking_reset_requests;
+	std::atomic<uint64_t> next_body_tracking_reset_id = 1;
+	std::atomic<uint64_t> body_epoch = 0;
+	std::atomic<bool> apply_body_tracking_settings_requested = false;
+	thread_safe<to_headset::body_tracking_status> body_tracking_status{};
+
 	std::shared_mutex decoder_mutex;
 	std::optional<to_headset::video_stream_description> video_stream_description;
 	std::array<accumulator_images, decoder_count> decoders; // Locked by decoder_mutex
 
 	std::optional<stream_defoveator> defoveator;
+	// The QCOM GLES probe is diagnostic only.  The Vulkan synthesizer below is
+	// the functional path and remains the fallback on every platform.
+	std::unique_ptr<frame_synthesis::motion_estimator> qcom_motion_probe;
+	std::optional<stream_synthesizer> synthesizer;
+	bool headset_color_capable = false;
+	std::atomic<bool> reset_frame_synthesis_requested = false;
+	bool headset_color_was_active = false;
+	bool headset_synthesis_session_disabled = false;
+	wivrn::frame_synthesis_policy synthesis_policy{wivrn::frame_synthesis_policy_mode::off};
+	uint64_t last_headset_real_frame_index = UINT64_MAX;
+	std::optional<stream_synthesizer::frame_metadata> latest_real_metadata;
+	std::atomic<uint64_t> headset_real_frame_count = 0;
+	std::atomic<uint64_t> headset_generated_frame_count = 0;
+	std::atomic<uint64_t> headset_pose_only_frame_count = 0;
+	std::atomic<uint64_t> headset_rejected_frame_count = 0;
+	std::atomic<float> headset_synthesis_gpu_time = 0.0f;
+	std::atomic<wivrn::frame_synthesis_reason> headset_fallback_reason = wivrn::frame_synthesis_reason::none;
+	wivrn::upscaling_mode requested_upscaling = wivrn::upscaling_mode::native;
+	wivrn::upscaling_mode initial_effective_upscaling = wivrn::upscaling_mode::native;
+	std::atomic<wivrn::upscaling_mode> effective_upscaling = wivrn::upscaling_mode::native;
+	std::optional<wivrn::scaling_watchdog> scaling_watchdog;
+	std::atomic<bool> reset_scaling_watchdog_requested = false;
+	std::atomic<wivrn::runtime_fallback_reason> client_scaling_fallback_reason = wivrn::runtime_fallback_reason::none;
+	struct
+	{
+		uint32_t candidate = 0; // normal, then quality
+		uint32_t frames = 0;
+		uint32_t missed = 0;
+		bool normal_viable = false;
+		bool complete = false;
+		XrCompositionLayerSettingsFlagsFB selected = 0;
+	} meta_filter_tuning;
+	std::atomic<uint64_t> real_frame_count = 0;
+	std::atomic<uint64_t> synthetic_frame_count = 0;
+	uint64_t last_counted_frame_index = UINT64_MAX;
+	thread_safe<to_headset::runtime_telemetry> server_runtime_telemetry{};
 
 	vk::raii::Fence fence = nullptr;
 	vk::raii::CommandBuffer command_buffer = nullptr;
@@ -125,7 +176,8 @@ private:
 	{
 		state previous = state_.load();
 		while (previous != state::shutdown && !state_.compare_exchange_weak(previous, new_state))
-		{}
+		{
+		}
 	}
 
 	xr::swapchain swapchain;
@@ -261,6 +313,9 @@ public:
 	void operator()(to_headset::haptics &&);
 	void operator()(to_headset::timesync_query &&);
 	void operator()(to_headset::tracking_control &&);
+	void operator()(to_headset::runtime_telemetry &&);
+	void operator()(to_headset::body_tracking_reset_ack &&);
+	void operator()(to_headset::body_tracking_status &&);
 	void operator()(to_headset::feature_control &&);
 	void operator()(to_headset::audio_stream_description &&);
 	void operator()(to_headset::video_stream_description &&);
@@ -289,8 +344,12 @@ public:
 
 	void exit();
 	void request_disconnect(disconnect_mode mode = disconnect_mode::default_mode);
+	uint64_t request_body_tracking_reset(wivrn::body_tracking_reset scope);
 	uint32_t reconnect_remaining_seconds() const;
-	connection_close_reason reconnect_close_reason() const { return reconnect_reason.load(); }
+	connection_close_reason reconnect_close_reason() const
+	{
+		return reconnect_reason.load();
+	}
 	void start_application(std::string appid);
 
 	static meta & get_meta_scene();
@@ -308,6 +367,7 @@ private:
 
 	void setup(const to_headset::video_stream_description &);
 	void setup_reprojection_swapchain(uint32_t width, uint32_t height);
+	void disable_headset_synthesis_for_session(wivrn::frame_synthesis_reason reason);
 
 	vk::raii::QueryPool query_pool = nullptr;
 	bool query_pool_filled = false;
