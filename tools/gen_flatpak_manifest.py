@@ -61,6 +61,10 @@ if __name__ == "__main__":
     boost_url = cmake.get("boost", "URL")
     boost_sha256 = cmake.get("boost", "URL_HASH").split("=")[-1]
 
+    git_commit = (
+        subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root).decode().strip()
+    )
+
     try:
         git_tag = (
             subprocess.check_output(
@@ -69,13 +73,9 @@ if __name__ == "__main__":
             .decode()
             .strip()
         )
-        git_commit = ""
         git_desc = ""
     except subprocess.CalledProcessError:
         git_tag = ""
-        git_commit = (
-            subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root).decode().strip()
-        )
         git_desc = (
             subprocess.check_output(["git", "describe", "--tags", "--always"], cwd=root)
             .decode()
@@ -88,7 +88,10 @@ if __name__ == "__main__":
             template = template.replace("WIVRN_SRC2", f"url: {args.git}")
         else:
             template = template.replace("WIVRN_SRC2", f"url: {root}")
-        template = template.replace("WIVRN_SRC3", f"tag: {git_commit}")
+        # Flatpak's git source accepts an immutable commit directly.  Do not
+        # put a commit hash in `tag`, and do not leave the revision empty when
+        # the checkout happens to be on an exact release tag.
+        template = template.replace("WIVRN_SRC3", f"commit: {git_commit}")
     else:
         template = template.replace("WIVRN_SRC1", "type: dir")
         template = template.replace("WIVRN_SRC2", f"path: {root}")
