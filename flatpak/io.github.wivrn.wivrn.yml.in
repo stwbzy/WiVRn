@@ -102,12 +102,9 @@ modules:
 
   - name: toolchain
     sources:
-    # mirror-urls are fallbacks, used when the primary url fails.
     - type: file
-      url: https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-5.15.177.tar.xz
-      mirror-urls:
-        - https://mirrors.edge.kernel.org/pub/linux/kernel/v5.x/linux-5.15.177.tar.xz
-      sha256: ea9eb8088d4231f8a01b191ceef5f4d92238f6c7519f6fbcb57e448ee9e0a6e0
+      url: https://github.com/gregkh/linux/archive/refs/tags/v5.15.177.tar.gz
+      sha256: c6cf5b3795b797fbabf837c98219587ab2aad25b380b63c24c0f9e99eaa4768d
     - type: file
       url: https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.xz
       sha256: 38ef96b8dfe510d42707d9c781877914792541133e1870841463bfa73f883e32
