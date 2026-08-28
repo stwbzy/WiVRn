@@ -299,6 +299,13 @@ add_custom_target(wivrn-version ALL
         SOURCES common/version.cpp.in server/u_git_tag.cpp.in
     )
 
+# Server-only test builds still compile protocol headers that use OpenXR
+# types.  Materialize the bundled SDK before `common` so those targets receive
+# the same headers as the standalone harness.
+if(WIVRN_BUILD_TEST AND NOT ANDROID AND NOT WIVRN_USE_SYSTEM_OPENXR)
+    FetchContent_MakeAvailable(openxr_loader)
+endif()
+
 add_subdirectory(external)
 if (NEED_COMMON)
     add_subdirectory(common)

@@ -967,7 +967,8 @@ bool compositor::dispatch_frame_generation_motion(vk::raii::CommandBuffer & comm
 			        .current_to_tangent = reprojection.target_to_tangent,
 			};
 			command.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *flow.layout, 0, flow.descriptor_sets[descriptor_index], {});
-			command.pushConstants(*flow.layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
+			command.pushConstants<frame_generation_flow_push_constants>(
+			        *flow.layout, vk::ShaderStageFlagBits::eCompute, 0, constants);
 			command.dispatch((output_extent.width + 15) / 16, (output_extent.height + 15) / 16, 1);
 		}
 	};
@@ -1132,11 +1133,8 @@ bool compositor::dispatch_frame_generation_candidate(vk::raii::CommandBuffer & c
 		                           0,
 		                           frame_generation->descriptor_sets[view],
 		                           {});
-		command.pushConstants(*frame_generation->layout,
-		                      vk::ShaderStageFlagBits::eCompute,
-		                      0,
-		                      sizeof(constants),
-		                      &constants);
+		command.pushConstants<frame_generation_push_constants>(
+		        *frame_generation->layout, vk::ShaderStageFlagBits::eCompute, 0, constants);
 		command.dispatch((extent.width + 15) / 16, (extent.height + 15) / 16, 1);
 	}
 
