@@ -96,6 +96,9 @@ set -- "$@" \
 	--custom-apprun "$SOURCE_DIR/packaging/portable-linux/AppRun"
 APPIMAGE_EXTRACT_AND_RUN=1 "$@"
 
-ARCH="$ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGETOOL" \
-	"$APPDIR" "$OUTPUT_DIR/${BASE_NAME}.AppImage"
+# appimagetool forwards its own timestamp options to mksquashfs.  Newer
+# squashfs-tools reject those options when SOURCE_DATE_EPOCH is also present,
+# so keep the deterministic timestamp for the tarball but clear it here.
+env -u SOURCE_DATE_EPOCH ARCH="$ARCH" APPIMAGE_EXTRACT_AND_RUN=1 \
+	"$APPIMAGETOOL" "$APPDIR" "$OUTPUT_DIR/${BASE_NAME}.AppImage"
 chmod +x "$OUTPUT_DIR/${BASE_NAME}.AppImage"
