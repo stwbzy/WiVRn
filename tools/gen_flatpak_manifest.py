@@ -97,9 +97,14 @@ if __name__ == "__main__":
         template = template.replace("WIVRN_SRC2", f"path: {root}")
         template = template.replace("WIVRN_SRC3", "")
 
+    # A tagged build is represented by GIT_TAG alone. CMake deliberately
+    # rejects GIT_COMMIT/GIT_DESC alongside it and derives both values from
+    # the tag. Keep git_commit above for the immutable Flatpak source pin.
+    cmake_git_commit = "" if git_tag else git_commit
+
     template = template.replace("WIVRN_GIT_TAG", git_tag)
     template = template.replace("WIVRN_GIT_DESC", git_desc)
-    template = template.replace("WIVRN_GIT_COMMIT", git_commit)
+    template = template.replace("WIVRN_GIT_COMMIT", cmake_git_commit)
 
     template = template.replace("BOOST_URL", boost_url)
     template = template.replace("BOOST_SHA256", boost_sha256)
