@@ -456,6 +456,20 @@ void scenes::stream::tracking()
 
 	XrDuration frame_duration{};
 	XrTime pattern_begin = instance.now();
+	const auto ensure_pose_anchors = [&] {
+		if (!body_tracking || config.body_tracking.pose_assist.mode == wivrn::body_pose_assist_mode::off ||
+		    !std::ranges::contains(pattern, device_id::BODY, &to_headset::tracking_control::sample::device))
+			return;
+		bool added = false;
+		for (const auto device: {device_id::LEFT_GRIP, device_id::RIGHT_GRIP})
+			if (spaces[device] && not std::ranges::contains(pattern, device, &to_headset::tracking_control::sample::device))
+			{
+				pattern.push_back({.device = device});
+				added = true;
+			}
+		if (added && frame_duration > 0)
+			std::ranges::sort(pattern, std::less{}, [frame_duration](const auto & i) { return -i.prediction_ns % frame_duration; });
+	};
 
 	while (state_ != state::shutdown)
 	{
@@ -546,6 +560,7 @@ void scenes::stream::tracking()
 					}
 				}
 			}
+			ensure_pose_anchors();
 
 			// Reset requests are only observed and acted upon by this tracking
 			// thread.  BODY is considered requested only when it is part of the

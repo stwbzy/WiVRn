@@ -1,0 +1,6 @@
+# Packages from the host's signed pacman repository metadata; extracted locally.
+# name sha256 url
+capstone 18f5a688877f94a6bbd6f19b471e847679abecea83c1478eb81112e53529d05b https://us-mnz.soulharsh007.dev/cachyos/repo/x86_64_v3/cachyos-extra-v3/capstone-5.0.9-1.1-x86_64_v3.pkg.tar.zst
+libutf8proc 9b4122f471fac8dce8b84b6d91d5e96cfaf5c002e487f89ab1d2df907d74c4f8 https://us-mnz.soulharsh007.dev/cachyos/repo/x86_64_v3/cachyos-extra-v3/libutf8proc-2.11.3-1.1-x86_64_v3.pkg.tar.zst
+webkitgtk-6.0 1e50283612a5f835d5c505fb7735d2f9cb83dd5d75a9d76328efb68a98a8ee67 https://archlinux.cachyos.org/repo/extra/os/x86_64/webkitgtk-6.0-2.52.6-1-x86_64.pkg.tar.zst
+sdl3_ttf 99633afa451cf1ece8f74e19fbb9f439a4672aaae8c01c8fddffafd6af422e41 file:///var/cache/pacman/pkg/sdl3_ttf-3.2.2-3.2-x86_64_v3.pkg.tar.zst

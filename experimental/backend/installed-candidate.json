@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "profiles": [
+    {
+      "version_name": "2.737.1584",
+      "version_code": 3056,
+      "elf_build_id": "3b211f25d8658e88e28c86a4ff1e02ff96092741",
+      "status": "experimental",
+      "default_allowed": false,
+      "allow_legacy_binary_patches": false,
+      "allow_host_abi_bridges": true,
+      "allow_host_constructor_replay": false,
+      "vr_debug_device_bridge": {
+        "vtable_rva": "0x6c7c138",
+        "constructor_rva": "0x37cb87e",
+        "state_getter_rva": "0x37cbc60",
+        "eye_getter_rva": "0x37cbc50",
+        "eye_initializer_rva": "0x37cbc82",
+        "emulator_flag_storage_rva": "0x7361fb0",
+        "device_create_framebuffer_vtable_offset": "0x188"
+      },
+      "reason": "Local static candidate only: derived from Build ID and SHA-256, instructions verified read-only. Requires optional compile flag, explicit experimental gate and exact payload hash. Not a validated Android host ABI, Sober injector or live Roblox acceptance."
+    }
+  ]
+}

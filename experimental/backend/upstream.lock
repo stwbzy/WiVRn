@@ -1,0 +1,4 @@
+repository=https://github.com/komaruworld/mocktail.git
+revision=9a1ccbb5cebea7bb578bfb198d2a3246734e6a40
+branch_at_checkout=vr
+license=Apache-2.0

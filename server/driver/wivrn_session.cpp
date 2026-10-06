@@ -583,6 +583,10 @@ bool wivrn_session::accept_packet_generation(uint64_t generation)
 void wivrn_session::reset_body_tracking_state(uint64_t epoch)
 {
 	current_body_epoch = epoch;
+	{
+		std::lock_guard lock(body_anchor_mutex);
+		body_anchor_history.clear();
+	}
 	if (body_tracker)
 		body_tracker->reset_tracking();
 	for (auto & tracker: generic_trackers)
@@ -741,6 +745,8 @@ void wivrn_session::operator()(const from_headset::settings_changed & settings)
 	normalized.frame_synthesis_backend = frame_synthesis_negotiation::normalize_backend(requested_backend);
 	if (magic_enum::enum_name(normalized.body_tracking.profile).empty())
 		normalized.body_tracking.profile = body_tracking_profile::balanced;
+	if (magic_enum::enum_name(normalized.body_tracking.motion_profile).empty())
+		normalized.body_tracking.motion_profile = body_motion_profile::current;
 	if (magic_enum::enum_name(normalized.body_tracking.fidelity).empty())
 		normalized.body_tracking.fidelity = body_tracking_fidelity::automatic;
 	if (magic_enum::enum_name(normalized.body_tracking.calibration_mode).empty())
@@ -760,9 +766,33 @@ void wivrn_session::operator()(const from_headset::settings_changed & settings)
 	normalized.body_tracking.recovery_samples =
 	        std::clamp<uint16_t>(normalized.body_tracking.recovery_samples, 1, 32);
 	normalized.body_tracking.prediction_ms = std::min<uint16_t>(normalized.body_tracking.prediction_ms, 100);
+	normalized.body_tracking.micro_motion_threshold_mm = std::min<uint16_t>(normalized.body_tracking.micro_motion_threshold_mm, 40);
 	if (normalized.body_tracking.body_height_mm)
 		*normalized.body_tracking.body_height_mm =
 		        std::clamp<uint16_t>(*normalized.body_tracking.body_height_mm, 1000, 2500);
+	if (magic_enum::enum_name(normalized.body_tracking.pose_assist.mode).empty())
+		normalized.body_tracking.pose_assist.mode = body_pose_assist_mode::off;
+	if (magic_enum::enum_name(normalized.body_tracking.pose_assist.manual_pose).empty())
+		normalized.body_tracking.pose_assist.manual_pose = body_pose_kind::back;
+	if (magic_enum::enum_name(normalized.body_tracking.pose_assist.surface).empty())
+		normalized.body_tracking.pose_assist.surface = body_surface_mode::floor;
+	if (magic_enum::enum_name(normalized.body_tracking.pose_assist.output).empty())
+		normalized.body_tracking.pose_assist.output = body_pose_output::virtual_trackers;
+	normalized.body_tracking.pose_assist.bed_height_mm =
+	        std::min<uint16_t>(normalized.body_tracking.pose_assist.bed_height_mm, 1500);
+	normalized.body_tracking.pose_assist.transition_ms =
+	        std::clamp<uint16_t>(normalized.body_tracking.pose_assist.transition_ms, 50, 2000);
+	normalized.body_tracking.pose_assist.lower_body_influence_permille =
+	        std::min<uint16_t>(normalized.body_tracking.pose_assist.lower_body_influence_permille, 1000);
+	normalized.body_tracking.pose_assist.anchor_influence_permille =
+	        std::min<uint16_t>(normalized.body_tracking.pose_assist.anchor_influence_permille, 1000);
+	for (auto & profile: normalized.body_tracking.pose_assist.profiles)
+	{
+		profile.hip_height_mm = std::min<uint16_t>(profile.hip_height_mm, 500);
+		profile.knee_bend_deg = std::min<uint16_t>(profile.knee_bend_deg, 150);
+		profile.leg_spread_mm = std::min<uint16_t>(profile.leg_spread_mm, 600);
+		profile.foot_spread_mm = std::min<uint16_t>(profile.foot_spread_mm, 500);
+	}
 	*this->settings.lock() = normalized;
 	requested_frame_synthesis_backend.store(normalized.frame_synthesis_backend);
 
@@ -941,6 +971,7 @@ void wivrn_session::operator()(const from_headset::tracking & tracking)
 	}
 
 	hmd.update_tracking(tracking, offset);
+	record_body_anchors(tracking);
 	if (roles.left == left_hand_interaction_index)
 		left_hand_interaction.update_tracking(tracking, offset);
 	else
@@ -961,6 +992,62 @@ void wivrn_session::operator()(const from_headset::tracking & tracking)
 		fb_face2_tracker->update_tracking(tracking, offset);
 	else if (htc_face_tracker)
 		htc_face_tracker->update_tracking(tracking, offset);
+}
+
+void wivrn_session::record_body_anchors(const from_headset::tracking & tracking)
+{
+	body_anchor_sample sample{};
+	sample.timestamp_ns = tracking.timestamp;
+	for (const auto & pose: tracking.device_poses)
+	{
+		xrt_space_relation relation{
+		        .relation_flags = from_pose_flags(pose.flags),
+		        .pose = xrt_cast(pose.pose),
+		        .linear_velocity = {pose.linear_velocity.x, pose.linear_velocity.y, pose.linear_velocity.z},
+		        .angular_velocity = {pose.angular_velocity.x, pose.angular_velocity.y, pose.angular_velocity.z},
+		};
+		switch (pose.device)
+		{
+			case device_id::HEAD:
+				sample.head = relation;
+				sample.head_valid = (pose.flags & from_headset::pose_flags::orientation_valid) &&
+				                    (pose.flags & from_headset::pose_flags::position_valid);
+				break;
+			case device_id::LEFT_GRIP:
+				sample.left_hand = relation;
+				sample.left_hand_valid = (pose.flags & from_headset::pose_flags::orientation_valid) &&
+				                         (pose.flags & from_headset::pose_flags::position_valid);
+				break;
+			case device_id::RIGHT_GRIP:
+				sample.right_hand = relation;
+				sample.right_hand_valid = (pose.flags & from_headset::pose_flags::orientation_valid) &&
+				                          (pose.flags & from_headset::pose_flags::position_valid);
+				break;
+			default:
+				break;
+		}
+	}
+
+	std::lock_guard lock(body_anchor_mutex);
+	body_anchor_history.push_back(sample);
+	while (body_anchor_history.size() > 64)
+		body_anchor_history.pop_front();
+}
+
+std::optional<body_anchor_sample> wivrn_session::get_body_anchors(int64_t timestamp_ns) const
+{
+	std::lock_guard lock(body_anchor_mutex);
+	if (body_anchor_history.empty())
+		return std::nullopt;
+	const auto best = std::min_element(body_anchor_history.begin(),
+	                                  body_anchor_history.end(),
+	                                  [timestamp_ns](const auto & a, const auto & b) {
+	                                  return std::llabs(a.timestamp_ns - timestamp_ns) <
+	                                         std::llabs(b.timestamp_ns - timestamp_ns);
+	                                  });
+	if (std::llabs(best->timestamp_ns - timestamp_ns) > 150'000'000)
+		return std::nullopt;
+	return *best;
 }
 
 void wivrn_session::operator()(from_headset::override_foveation_center && foveation_center)

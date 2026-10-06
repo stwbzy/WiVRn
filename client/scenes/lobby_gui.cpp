@@ -333,7 +333,7 @@ void scenes::lobby::gui_new_server()
 	ImGui::Dummy({0, 6});
 
 	ImGui::TextUnformatted(_S("Address"));
-	ui::input_text("##hostname", add_server_window_hostname, _cS("placeholder for the server address when adding/editing a server", "192.168.1.10 or host.local"), w);
+	ui::input_text("##hostname", add_server_window_hostname, _cS("placeholder for the server address when adding/editing a server", "192.0.2.1 or host.local"), w);
 	ImGui::Dummy({0, 6});
 
 	ImGui::TextUnformatted(_S("Port"));
@@ -1055,20 +1055,9 @@ std::vector<std::pair<int, XrCompositionLayerQuad>> scenes::lobby::draw_gui(XrTi
 	update_transfers();
 	update_file_picker();
 
-	ImGuiStyle & style = ImGui::GetStyle();
-	style.FontScaleMain = wivrn::ui::current().font_scale * wivrn::ui::metrics::font_base;
-
-	// rounding follows the theme so every window/popup gets rounded corners
-	style.WindowRounding = wivrn::ui::current().card_rounding;
-	style.ChildRounding = wivrn::ui::current().card_rounding;
-	style.PopupRounding = wivrn::ui::current().card_rounding;
-	style.FrameRounding = wivrn::ui::current().rounding;
-	style.GrabRounding = wivrn::ui::current().rounding;
-	style.TabRounding = wivrn::ui::current().rounding;
-
-	// base text colour follows the theme so plain ImGui text stays legible
-	style.Colors[ImGuiCol_Text] = wivrn::ui::current().text;
-	style.Colors[ImGuiCol_TextDisabled] = wivrn::ui::current().text_muted;
+	// Apply the complete palette before any page draws, including stock ImGui
+	// controls used by the launcher and first-run flow.
+	wivrn::ui::current().apply();
 
 	// combo modals open centred on the popup layer
 	const auto & ui_popup_layer = imgui_ctx->layers()[1];
@@ -1256,27 +1245,60 @@ std::vector<std::pair<int, XrCompositionLayerQuad>> scenes::lobby::draw_gui(XrTi
 			if (wivrn::ui::nav_item(ICON_FA_COMPUTER, _cS("tab label", "Computers"), current_tab == tab::server_list))
 				current_tab = tab::server_list;
 
-			wivrn::ui::nav_section(_cS("tab group", "SETTINGS"));
-			if (wivrn::ui::nav_item(ICON_FA_IMAGE, _cS("tab label", "Video"), current_tab == tab::video))
-				current_tab = tab::video;
-			if (wivrn::ui::nav_item(ICON_FA_VOLUME_HIGH, _cS("tab label", "Audio"), current_tab == tab::audio))
-				current_tab = tab::audio;
+			wivrn::ui::nav_section(_cS("tab group", "CONFIGURATION"));
 			if (wivrn::ui::nav_item(ICON_FA_TOWER_BROADCAST, _cS("tab label", "Streaming"), current_tab == tab::streaming))
 				current_tab = tab::streaming;
-			if (wivrn::ui::nav_item(ICON_FA_WAND_MAGIC_SPARKLES, _cS("tab label", "Post-processing"), current_tab == tab::post_processing))
-				current_tab = tab::post_processing;
-			if (wivrn::ui::nav_item(ICON_FA_KEYBOARD, _cS("tab label", "Devices"), current_tab == tab::devices))
-				current_tab = tab::devices;
+
+			static bool visual_open = false;
+			const bool visual_selected = current_tab == tab::video || current_tab == tab::post_processing;
+			if (wivrn::ui::nav_item(ICON_FA_IMAGE, _cS("tab label", "Visual"), visual_selected))
+			{
+				if (not visual_selected)
+					current_tab = tab::video;
+				visual_open = not visual_selected || not visual_open;
+			}
+			if (visual_open)
+			{
+				ImGui::Indent(22);
+				if (wivrn::ui::nav_item(ICON_FA_SLIDERS, _cS("tab label", "Rendering"), current_tab == tab::video))
+					current_tab = tab::video;
+				if (wivrn::ui::nav_item(ICON_FA_WAND_MAGIC_SPARKLES,
+				                        _cS("tab label", "Post-processing"),
+				                        current_tab == tab::post_processing))
+					current_tab = tab::post_processing;
+				ImGui::Unindent(22);
+			}
+
 			if (wivrn::ui::nav_item(ICON_FA_LOCATION_CROSSHAIRS, _cS("tab label", "Tracking"), current_tab == tab::tracking))
 				current_tab = tab::tracking;
+			if (wivrn::ui::nav_item(ICON_FA_VOLUME_HIGH, _cS("tab label", "Audio"), current_tab == tab::audio))
+				current_tab = tab::audio;
+			if (wivrn::ui::nav_item(ICON_FA_KEYBOARD, _cS("tab label", "Devices"), current_tab == tab::devices))
+				current_tab = tab::devices;
+
+			wivrn::ui::nav_section(_cS("tab group", "SYSTEM"));
 			if (wivrn::ui::nav_item(ICON_FA_GEARS, _cS("tab label", "System"), current_tab == tab::system))
 				current_tab = tab::system;
 
-			wivrn::ui::nav_section(_cS("tab group", "PERSONALIZE"));
-			if (wivrn::ui::nav_item(ICON_FA_IMAGE, _cS("tab label", "Environment"), current_tab == tab::customize))
-				current_tab = tab::customize;
-			if (wivrn::ui::nav_item(ICON_FA_PALETTE, _cS("tab label", "Theme"), current_tab == tab::theme))
-				current_tab = tab::theme;
+			static bool appearance_open = false;
+			const bool appearance_selected = current_tab == tab::customize || current_tab == tab::theme;
+			if (wivrn::ui::nav_item(ICON_FA_PALETTE, _cS("tab label", "Appearance"), appearance_selected))
+			{
+				if (not appearance_selected)
+					current_tab = tab::theme;
+				appearance_open = not appearance_selected || not appearance_open;
+			}
+			if (appearance_open)
+			{
+				ImGui::Indent(22);
+				if (wivrn::ui::nav_item(ICON_FA_IMAGE,
+				                        _cS("tab label", "Environment"),
+				                        current_tab == tab::customize))
+					current_tab = tab::customize;
+				if (wivrn::ui::nav_item(ICON_FA_PALETTE, _cS("tab label", "Theme"), current_tab == tab::theme))
+					current_tab = tab::theme;
+				ImGui::Unindent(22);
+			}
 #if WIVRN_CLIENT_DEBUG_MENU
 			if (wivrn::ui::nav_item(ICON_FA_BUG_SLASH, _cS("tab label", "Debug"), current_tab == tab::debug))
 				current_tab = tab::debug;

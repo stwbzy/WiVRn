@@ -37,17 +37,20 @@
 #include "xr/session.h"
 #include "xr/system.h"
 
+#include "IconsFontAwesome6.h"
 #include "imgui.h"
 
 #include <algorithm>
 #include <array>
 #include <boost/locale.hpp>
 #include <cmath>
+#include <format>
 #include <functional>
 #include <locale>
 #include <optional>
 #include <spdlog/fmt/fmt.h>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <vector>
 
@@ -72,6 +75,17 @@ enum class ui_kind
 	button,
 };
 
+enum class setting_group
+{
+	primary,
+	tracking_general,
+	tracking_body,
+	tracking_lying,
+	tracking_filters,
+	tracking_pose_tuning,
+	tracking_maintenance,
+};
+
 // one declarative setting, `enabled` greys the row out without hiding it
 struct setting
 {
@@ -79,6 +93,7 @@ struct setting
 	std::string label;
 	std::string description;
 	ui_kind ui = ui_kind::toggle;
+	setting_group group = setting_group::primary;
 
 	std::function<bool()> get_bool;
 	std::function<void(bool)> set_bool;
@@ -369,10 +384,10 @@ void settings_video(const settings_context & ctx)
 			        if (ctx.on_streaming_changed)
 				        ctx.on_streaming_changed(); },
 		        .options = [] { return std::vector<std::string>{
-			                                        _C("frame synthesis backend", "Auto"),
-			                                        _C("frame synthesis backend", "Headset color (experimental)"),
-			                                        _C("frame synthesis backend", "Server optical flow (experimental)"),
-		                                }; },
+			                        _C("frame synthesis backend", "Auto"),
+			                        _C("frame synthesis backend", "Headset color (experimental)"),
+			                        _C("frame synthesis backend", "Server optical flow (experimental)"),
+			                }; },
 		        .title = _("Synthesis backend"),
 		        .default_int = index(backends, default_config.frame_synthesis_backend).value_or(0),
 		});
@@ -674,10 +689,11 @@ bool settings_tracking(const settings_context & ctx)
 	const std::string disconnect_tip = ctx.in_game ? _C("tooltip for disabled settings", "Disconnect to change this setting.") : std::string{};
 	std::vector<setting> list;
 	bool changed = false;
+	bool runtime_body_settings_changed = false;
 	const bool body_settings_applyable = not ctx.in_game || bool(ctx.on_body_tracking_changed);
 	const std::string body_settings_tip = ctx.in_game && not ctx.on_body_tracking_changed
-	                                               ? _("This setting cannot be applied while streaming.")
-	                                               : disconnect_tip;
+	                                              ? _("This setting cannot be applied while streaming.")
+	                                              : disconnect_tip;
 	auto body_setting_enabled = [&ctx] { return not ctx.in_game || bool(ctx.on_body_tracking_changed); };
 
 	auto feature_toggle = [&](const char * id, std::string label, std::string desc, feature f) {
@@ -686,6 +702,7 @@ bool settings_tracking(const settings_context & ctx)
 		        .label = std::move(label),
 		        .description = std::move(desc),
 		        .ui = ui_kind::toggle,
+		        .group = setting_group::tracking_general,
 		        .get_bool = [&config, f] { return config.check_feature(f); },
 		        .set_bool = [&config, f](bool v) { config.set_feature(f, v); },
 		        .default_bool = default_config.check_feature(f),
@@ -745,6 +762,7 @@ bool settings_tracking(const settings_context & ctx)
 		                               ? _("Requires 'Hand and body tracking' to be enabled in the Quest movement tracking settings, otherwise body data will be guessed from controller and headset positions.")
 		                               : _("Stream body joint positions to the PC."),
 		        .ui = ui_kind::toggle,
+		        .group = setting_group::tracking_body,
 		        .get_bool = [&config] { return config.check_feature(feature::body_tracking); },
 		        .set_bool = [&config, &changed, supported_body_parts](bool v) {
 			        // A zero mask cannot produce any virtual trackers.  Seed it from the
@@ -755,11 +773,10 @@ bool settings_tracking(const settings_context & ctx)
 			                config.body_part_mask = supported_body_parts;
 			                changed = true;
 			        }
-			        config.set_feature(feature::body_tracking, v);
-		        },
-				.default_bool = default_config.check_feature(feature::body_tracking),
-				.enabled = [&ctx] { return not ctx.in_game; },
-				.disabled_tooltip = disconnect_tip,
+			        config.set_feature(feature::body_tracking, v); },
+		        .default_bool = default_config.check_feature(feature::body_tracking),
+		        .enabled = [&ctx] { return not ctx.in_game; },
+		        .disabled_tooltip = disconnect_tip,
 		});
 
 		list.push_back({
@@ -767,7 +784,8 @@ bool settings_tracking(const settings_context & ctx)
 		        .label = _C("setting name", "Virtual body trackers"),
 		        .description = _("Create virtual tracker devices."),
 		        .ui = ui_kind::combo_multi,
-				.get_multi = [&config, &body_parts_bit](int index) {
+		        .group = setting_group::tracking_body,
+		        .get_multi = [&config, &body_parts_bit](int index) {
 			        const auto underlying = std::to_underlying(body_parts_bit[index]);
 			        return config.body_part_mask & underlying; },
 		        .set_multi = [&config, &body_parts_bit, &changed](int index, bool value) {
@@ -780,11 +798,52 @@ bool settings_tracking(const settings_context & ctx)
 				else
 					config.body_part_mask &= ~underlying;
 				changed = true; },
-				.options = [&body_parts_names]() { return body_parts_names; },
-				.title = _C("setting name", "Virtual body trackers"),
-				.default_multi = body_parts_default,
-				.enabled = body_setting_enabled,
-				.disabled_tooltip = body_settings_tip,
+		        .options = [&body_parts_names]() { return body_parts_names; },
+		        .title = _C("setting name", "Virtual body trackers"),
+		        .default_multi = body_parts_default,
+		        .enabled = body_setting_enabled,
+		        .disabled_tooltip = body_settings_tip,
+		});
+
+		static constexpr std::array motion_profiles{
+		        wivrn::body_motion_profile::current,
+		        wivrn::body_motion_profile::automatic,
+		        wivrn::body_motion_profile::sprint,
+		        wivrn::body_motion_profile::chill,
+		        wivrn::body_motion_profile::flow,
+		};
+		list.push_back({
+		        .id = "##body_motion_profile",
+		        .label = _C("body tracking setting", "Movement profile"),
+		        .description = _("Choose how FBT should respond to fast, relaxed, or expressive movement. Current preserves the existing tracking behavior."),
+		        .ui = ui_kind::segmented,
+		        .group = setting_group::tracking_body,
+		        .get_int = [&config] { return index(motion_profiles, config.body_tracking.motion_profile).value_or(0); },
+		        .set_int = [&config, &changed](int value) {
+		                config.body_tracking.motion_profile = motion_profiles[value];
+		                changed = true; },
+		        .options = [] { return std::vector<std::string>{_("Current"), _("Auto"), _("Sprint"), _("Chill"), _("Flow")}; },
+		        .default_int = index(motion_profiles, default_config.body_tracking.motion_profile).value_or(0),
+		        .enabled = body_setting_enabled,
+		        .disabled_tooltip = body_settings_tip,
+		});
+
+		list.push_back({
+		        .id = "##body_micro_motion_threshold",
+		        .label = _C("body tracking advanced setting", "Micro-motion filter"),
+		        .description = _("Ignore small tracker displacements while the body is otherwise still."),
+		        .ui = ui_kind::slider,
+		        .group = setting_group::tracking_body,
+		        .get_int = [&config] { return int(config.body_tracking.micro_motion_threshold_mm); },
+		        .set_int = [&config, &changed](int value) {
+		                config.body_tracking.micro_motion_threshold_mm = uint16_t(std::clamp(value, 0, 40));
+		                changed = true; },
+		        .v_min = 0,
+		        .v_max = 40,
+		        .fmt = "%d mm",
+		        .default_int = default_config.body_tracking.micro_motion_threshold_mm,
+		        .enabled = body_setting_enabled,
+		        .disabled_tooltip = body_settings_tip,
 		});
 
 		static constexpr std::array profiles{
@@ -798,6 +857,7 @@ bool settings_tracking(const settings_context & ctx)
 		        .label = _C("body tracking setting", "Profile"),
 		        .description = _("Choose a stability/latency preset, or Custom to tune the tracking filters below."),
 		        .ui = ui_kind::segmented,
+		        .group = setting_group::tracking_body,
 		        .get_int = [&config] { return index(profiles, config.body_tracking.profile).value_or(1); },
 		        .set_int = [&config, &changed](int value) {
 			        config.body_tracking.profile = profiles[value];
@@ -818,15 +878,15 @@ bool settings_tracking(const settings_context & ctx)
 		        .label = _C("body tracking setting", "Fidelity"),
 		        .description = _("Automatic uses WiVRn's default (High when Meta fidelity is supported)."),
 		        .ui = ui_kind::segmented,
+		        .group = setting_group::tracking_body,
 		        .get_int = [&config] { return index(fidelities, config.body_tracking.fidelity).value_or(0); },
-		        .set_int = [&config, &changed](int value) {
+		        .set_int = [&config, &changed, &runtime_body_settings_changed](int value) {
 			        config.body_tracking.fidelity = fidelities[value];
+			        runtime_body_settings_changed = true;
 			        changed = true; },
 		        .options = [] { return std::vector<std::string>{_C("body tracking fidelity", "Auto"), _("Low"), _("High")}; },
 		        .default_int = index(fidelities, default_config.body_tracking.fidelity).value_or(0),
-		        .enabled = [body_setting_enabled, body_fidelity_supported] {
-			        return body_setting_enabled() && body_fidelity_supported;
-		        },
+		        .enabled = [body_setting_enabled, body_fidelity_supported] { return body_setting_enabled() && body_fidelity_supported; },
 		        .disabled_tooltip = body_fidelity_supported
 		                                    ? body_settings_tip
 		                                    : _("Body tracking fidelity is not supported by this runtime."),
@@ -841,18 +901,18 @@ bool settings_tracking(const settings_context & ctx)
 		        .label = _C("body tracking setting", "Calibration"),
 		        .description = _("Automatic calibration follows the headset. Manual calibration uses the height entered below."),
 		        .ui = ui_kind::segmented,
+		        .group = setting_group::tracking_body,
 		        .get_int = [&config] { return index(calibration_modes, config.body_tracking.calibration_mode).value_or(0); },
-		        .set_int = [&config, &default_config, &changed](int value) {
+		        .set_int = [&config, &default_config, &changed, &runtime_body_settings_changed](int value) {
 			        config.body_tracking.calibration_mode = calibration_modes[value];
 			        if (config.body_tracking.calibration_mode == wivrn::body_tracking_calibration_mode::manual &&
 			            !config.body_tracking.body_height_mm)
 				        config.body_tracking.body_height_mm = default_config.body_tracking.body_height_mm.value_or(1700);
+			        runtime_body_settings_changed = true;
 			        changed = true; },
 		        .options = [] { return std::vector<std::string>{_C("body tracking calibration", "Auto"), _("Manual")}; },
 		        .default_int = index(calibration_modes, default_config.body_tracking.calibration_mode).value_or(0),
-		        .enabled = [body_setting_enabled, body_height_override_supported] {
-			        return body_setting_enabled() && body_height_override_supported;
-		        },
+		        .enabled = [body_setting_enabled, body_height_override_supported] { return body_setting_enabled() && body_height_override_supported; },
 		        .disabled_tooltip = body_height_override_supported
 		                                    ? body_settings_tip
 		                                    : _("Body height override is not supported by this runtime."),
@@ -863,20 +923,18 @@ bool settings_tracking(const settings_context & ctx)
 		        .label = _C("body tracking setting", "Body height"),
 		        .description = _("Height used for manual calibration."),
 		        .ui = ui_kind::slider,
-		        .get_int = [&config, &default_config] {
-			        return int(config.body_tracking.body_height_mm.value_or(default_config.body_tracking.body_height_mm.value_or(1700)));
-		        },
-		        .set_int = [&config, &changed](int value) {
+		        .group = setting_group::tracking_body,
+		        .get_int = [&config, &default_config] { return int(config.body_tracking.body_height_mm.value_or(default_config.body_tracking.body_height_mm.value_or(1700))); },
+		        .set_int = [&config, &changed, &runtime_body_settings_changed](int value) {
 			        config.body_tracking.body_height_mm = uint16_t(std::clamp(value, 1000, 2500));
+			        runtime_body_settings_changed = true;
 			        changed = true; },
 		        .v_min = 1000,
 		        .v_max = 2500,
 		        .fmt = "%d mm",
 		        .default_int = int(default_config.body_tracking.body_height_mm.value_or(1700)),
-		        .enabled = [&ctx, body_setting_enabled, body_height_override_supported] {
-			        return body_setting_enabled() && body_height_override_supported &&
-			               ctx.config.body_tracking.calibration_mode == wivrn::body_tracking_calibration_mode::manual;
-		        },
+		        .enabled = [&ctx, body_setting_enabled, body_height_override_supported] { return body_setting_enabled() && body_height_override_supported &&
+			                                                                                 ctx.config.body_tracking.calibration_mode == wivrn::body_tracking_calibration_mode::manual; },
 		        .disabled_tooltip = body_height_override_supported
 		                                    ? body_settings_tip
 		                                    : _("Body height override is not supported by this runtime."),
@@ -892,6 +950,7 @@ bool settings_tracking(const settings_context & ctx)
 		        .label = _C("body tracking setting", "Supervisor"),
 		        .description = _("Select whether body samples are supervised before they are published."),
 		        .ui = ui_kind::segmented,
+		        .group = setting_group::tracking_filters,
 		        .get_int = [&config] { return index(supervisors, config.body_tracking.supervisor).value_or(0); },
 		        .set_int = [&config, &changed](int value) {
 			        config.body_tracking.supervisor = supervisors[value];
@@ -911,6 +970,7 @@ bool settings_tracking(const settings_context & ctx)
 		        .label = _C("body tracking setting", "Supervisor path"),
 		        .description = _("Supervised uses the filtered relation; Raw forwards the unfiltered relation."),
 		        .ui = ui_kind::segmented,
+		        .group = setting_group::tracking_filters,
 		        .get_int = [&config] { return index(supervisor_paths, config.body_tracking.supervisor_path).value_or(0); },
 		        .set_int = [&config, &changed](int value) {
 			        config.body_tracking.supervisor_path = supervisor_paths[value];
@@ -934,6 +994,7 @@ bool settings_tracking(const settings_context & ctx)
 		        .label = _C("body tracking advanced setting", "Position smoothing"),
 		        .description = _("Smooth position changes to reduce jitter; higher values add latency."),
 		        .ui = ui_kind::slider,
+		        .group = setting_group::tracking_filters,
 		        .get_int = [&config] { return int(config.body_tracking.smoothing_position_permille / 10); },
 		        .set_int = [&config, &changed](int value) {
 			        config.body_tracking.smoothing_position_permille = uint16_t(std::clamp(value, 0, 100) * 10);
@@ -951,6 +1012,7 @@ bool settings_tracking(const settings_context & ctx)
 		        .label = _C("body tracking advanced setting", "Rotation smoothing"),
 		        .description = _("Smooth rotation changes to reduce jitter; higher values add latency."),
 		        .ui = ui_kind::slider,
+		        .group = setting_group::tracking_filters,
 		        .get_int = [&config] { return int(config.body_tracking.smoothing_rotation_permille / 10); },
 		        .set_int = [&config, &changed](int value) {
 			        config.body_tracking.smoothing_rotation_permille = uint16_t(std::clamp(value, 0, 100) * 10);
@@ -968,6 +1030,7 @@ bool settings_tracking(const settings_context & ctx)
 		        .label = _C("body tracking advanced setting", "Confidence threshold"),
 		        .description = _("Reject body poses below this confidence level."),
 		        .ui = ui_kind::slider,
+		        .group = setting_group::tracking_filters,
 		        .get_int = [&config] { return int(config.body_tracking.confidence_threshold_permille / 10); },
 		        .set_int = [&config, &changed](int value) {
 			        config.body_tracking.confidence_threshold_permille = uint16_t(std::clamp(value, 0, 100) * 10);
@@ -985,6 +1048,7 @@ bool settings_tracking(const settings_context & ctx)
 		        .label = _C("body tracking advanced setting", "Dropout hold"),
 		        .description = _("Hold the last valid pose for this long during a brief dropout."),
 		        .ui = ui_kind::slider,
+		        .group = setting_group::tracking_filters,
 		        .get_int = [&config] { return int(config.body_tracking.dropout_hold_ms); },
 		        .set_int = [&config, &changed](int value) {
 			        config.body_tracking.dropout_hold_ms = uint16_t(std::clamp(value, 0, 2000));
@@ -1002,6 +1066,7 @@ bool settings_tracking(const settings_context & ctx)
 		        .label = _C("body tracking advanced setting", "Recovery samples"),
 		        .description = _("Require consecutive valid samples before declaring tracking recovered."),
 		        .ui = ui_kind::slider,
+		        .group = setting_group::tracking_filters,
 		        .get_int = [&config] { return int(config.body_tracking.recovery_samples); },
 		        .set_int = [&config, &changed](int value) {
 			        config.body_tracking.recovery_samples = uint16_t(std::clamp(value, 1, 32));
@@ -1019,6 +1084,7 @@ bool settings_tracking(const settings_context & ctx)
 		        .label = _C("body tracking advanced setting", "Prediction"),
 		        .description = _("Predict body motion ahead by this many milliseconds."),
 		        .ui = ui_kind::slider,
+		        .group = setting_group::tracking_filters,
 		        .get_int = [&config] { return int(config.body_tracking.prediction_ms); },
 		        .set_int = [&config, &changed](int value) {
 			        config.body_tracking.prediction_ms = uint16_t(std::clamp(value, 0, 100));
@@ -1036,6 +1102,7 @@ bool settings_tracking(const settings_context & ctx)
 		        .label = _C("body tracking advanced setting", "Floor assist"),
 		        .description = _("Keep feet aligned to the floor when the provider does not report a stable floor."),
 		        .ui = ui_kind::toggle,
+		        .group = setting_group::tracking_filters,
 		        .get_bool = [&config] { return config.body_tracking.floor_assist; },
 		        .set_bool = [&config, &changed](bool value) {
 			        config.body_tracking.floor_assist = value;
@@ -1045,42 +1112,391 @@ bool settings_tracking(const settings_context & ctx)
 		        .disabled_tooltip = custom_tip,
 		});
 
+		if (body_tracker != xr::body_tracker_type::htc)
+		{
+			static constexpr std::array pose_modes{
+			        wivrn::body_pose_assist_mode::off,
+			        wivrn::body_pose_assist_mode::automatic,
+			        wivrn::body_pose_assist_mode::manual,
+			};
+			list.push_back({
+			        .id = "##body_pose_assist_mode",
+			        .label = _C("body pose setting", "Lying pose assist"),
+			        .description = _("Keep virtual trackers stable while lying down by giving more influence to the headset and controllers."),
+			        .ui = ui_kind::segmented,
+			        .group = setting_group::tracking_lying,
+			        .get_int = [&config] { return index(pose_modes, config.body_tracking.pose_assist.mode).value_or(0); },
+			        .set_int = [&config, &changed](int value) {
+		                config.body_tracking.pose_assist.mode = pose_modes[value];
+		                changed = true; },
+			        .options = [] { return std::vector<std::string>{_("Off"), _C("body pose assist", "Auto"), _C("body pose assist", "Manual")}; },
+			        .default_int = index(pose_modes, default_config.body_tracking.pose_assist.mode).value_or(0),
+			        .enabled = body_setting_enabled,
+			        .disabled_tooltip = body_settings_tip,
+			});
+
+			static constexpr std::array pose_assets{
+			        wivrn::body_pose_asset_selection::procedural,
+			        wivrn::body_pose_asset_selection::unity_animation_25,
+			};
+			list.push_back({
+			        .id = "##body_pose_assist_asset",
+			        .label = _C("body pose setting", "Pose source"),
+			        .description = _("Animation 25 uses the validated Unity pose for Back. Other directions safely fall back to the procedural solver."),
+			        .ui = ui_kind::segmented,
+			        .group = setting_group::tracking_lying,
+			        .get_int = [&config] { return index(pose_assets, config.body_tracking.pose_assist.asset).value_or(0); },
+			        .set_int = [&config, &changed](int value) {
+			                config.body_tracking.pose_assist.asset = pose_assets[value];
+			                changed = true; },
+			        .options = [] { return std::vector<std::string>{_("Procedural"), _("Animation 25")}; },
+			        .default_int = index(pose_assets, default_config.body_tracking.pose_assist.asset).value_or(0),
+			        .enabled = body_setting_enabled,
+			        .disabled_tooltip = body_settings_tip,
+			});
+
+			static constexpr std::array pose_kinds{
+			        wivrn::body_pose_kind::upright,
+			        wivrn::body_pose_kind::back,
+			        wivrn::body_pose_kind::front,
+			        wivrn::body_pose_kind::left_side,
+			        wivrn::body_pose_kind::right_side,
+			};
+			list.push_back({
+			        .id = "##body_pose_assist_manual_pose",
+			        .label = _C("body pose setting", "Manual posture"),
+			        .description = _("Select the lying direction when automatic classification is not desired."),
+			        .ui = ui_kind::segmented,
+			        .group = setting_group::tracking_lying,
+			        .get_int = [&config] { return index(pose_kinds, config.body_tracking.pose_assist.manual_pose).value_or(0); },
+			        .set_int = [&config, &changed](int value) {
+		                config.body_tracking.pose_assist.manual_pose = pose_kinds[value];
+		                changed = true; },
+			        .options = [] { return std::vector<std::string>{_("Upright"), _("Back"), _("Front"), _("Left side"), _("Right side")}; },
+			        .default_int = index(pose_kinds, default_config.body_tracking.pose_assist.manual_pose).value_or(1),
+			        .enabled = [&config, body_setting_enabled] { return body_setting_enabled() && config.body_tracking.pose_assist.mode == wivrn::body_pose_assist_mode::manual; },
+			        .disabled_tooltip = _("Select Manual to choose a fixed posture."),
+			});
+
+			static constexpr std::array surfaces{
+			        wivrn::body_surface_mode::floor,
+			        wivrn::body_surface_mode::bed,
+			};
+			list.push_back({
+			        .id = "##body_pose_assist_surface",
+			        .label = _C("body pose setting", "Support surface"),
+			        .description = _("Use the floor or a separate bed height as the support plane for feet and knees."),
+			        .ui = ui_kind::segmented,
+			        .group = setting_group::tracking_lying,
+			        .get_int = [&config] { return index(surfaces, config.body_tracking.pose_assist.surface).value_or(0); },
+			        .set_int = [&config, &changed](int value) {
+		                config.body_tracking.pose_assist.surface = surfaces[value];
+		                changed = true; },
+			        .options = [] { return std::vector<std::string>{_("Floor"), _("Bed")}; },
+			        .default_int = index(surfaces, default_config.body_tracking.pose_assist.surface).value_or(0),
+			        .enabled = body_setting_enabled,
+			        .disabled_tooltip = body_settings_tip,
+			});
+
+			list.push_back({
+			        .id = "##body_pose_assist_bed_height",
+			        .label = _C("body pose setting", "Bed height"),
+			        .description = _("Height of the bed above the tracking floor."),
+			        .ui = ui_kind::slider,
+			        .group = setting_group::tracking_lying,
+			        .get_int = [&config] { return int(config.body_tracking.pose_assist.bed_height_mm); },
+			        .set_int = [&config, &changed](int value) {
+		                config.body_tracking.pose_assist.bed_height_mm = uint16_t(std::clamp(value, 0, 1500));
+		                changed = true; },
+			        .v_min = 0,
+			        .v_max = 1500,
+			        .fmt = "%d mm",
+			        .default_int = default_config.body_tracking.pose_assist.bed_height_mm,
+			        .enabled = [&config, body_setting_enabled] { return body_setting_enabled() && config.body_tracking.pose_assist.surface == wivrn::body_surface_mode::bed; },
+			        .disabled_tooltip = _("Select Bed as the support surface."),
+			});
+
+			list.push_back({
+			        .id = "##body_pose_assist_transition",
+			        .label = _C("body pose setting", "Transition time"),
+			        .description = _("Blend into a lying pose gradually to avoid sudden tracker jumps."),
+			        .ui = ui_kind::slider,
+			        .group = setting_group::tracking_lying,
+			        .get_int = [&config] { return int(config.body_tracking.pose_assist.transition_ms); },
+			        .set_int = [&config, &changed](int value) {
+		                config.body_tracking.pose_assist.transition_ms = uint16_t(std::clamp(value, 50, 2000));
+		                changed = true; },
+			        .v_min = 50,
+			        .v_max = 2000,
+			        .fmt = "%d ms",
+			        .default_int = default_config.body_tracking.pose_assist.transition_ms,
+			        .enabled = body_setting_enabled,
+			        .disabled_tooltip = body_settings_tip,
+			});
+
+			list.push_back({
+			        .id = "##body_pose_assist_lower_influence",
+			        .label = _C("body pose setting", "Lower-body influence"),
+			        .description = _("Lower values trust the synthesized lying pose more than unstable virtual leg trackers."),
+			        .ui = ui_kind::slider,
+			        .group = setting_group::tracking_pose_tuning,
+			        .get_int = [&config] { return int(config.body_tracking.pose_assist.lower_body_influence_permille / 10); },
+			        .set_int = [&config, &changed](int value) {
+		                config.body_tracking.pose_assist.lower_body_influence_permille = uint16_t(std::clamp(value, 0, 100) * 10);
+		                changed = true; },
+			        .v_min = 0,
+			        .v_max = 100,
+			        .fmt = "%d%%",
+			        .default_int = default_config.body_tracking.pose_assist.lower_body_influence_permille / 10,
+			        .enabled = [&config, body_setting_enabled] {
+				        return body_setting_enabled() &&
+				               config.body_tracking.pose_assist.asset == wivrn::body_pose_asset_selection::procedural;
+			        },
+			        .disabled_tooltip = _("This control applies only to the procedural pose source."),
+			});
+
+			list.push_back({
+			        .id = "##body_pose_assist_anchor_influence",
+			        .label = _C("body pose setting", "Anchor confidence"),
+			        .description = _("Confidence assigned to synthesized joints when HMD/controller anchors are valid."),
+			        .ui = ui_kind::slider,
+			        .group = setting_group::tracking_pose_tuning,
+			        .get_int = [&config] { return int(config.body_tracking.pose_assist.anchor_influence_permille / 10); },
+			        .set_int = [&config, &changed](int value) {
+		                config.body_tracking.pose_assist.anchor_influence_permille = uint16_t(std::clamp(value, 0, 100) * 10);
+		                changed = true; },
+			        .v_min = 0,
+			        .v_max = 100,
+			        .fmt = "%d%%",
+			        .default_int = default_config.body_tracking.pose_assist.anchor_influence_permille / 10,
+			        .enabled = body_setting_enabled,
+			        .disabled_tooltip = body_settings_tip,
+			});
+
+			static constexpr std::array profile_ids{
+			        std::array{"##body_pose_back_hip", "##body_pose_back_knee", "##body_pose_back_legs", "##body_pose_back_feet"},
+			        std::array{"##body_pose_front_hip", "##body_pose_front_knee", "##body_pose_front_legs", "##body_pose_front_feet"},
+			        std::array{"##body_pose_left_hip", "##body_pose_left_knee", "##body_pose_left_legs", "##body_pose_left_feet"},
+			        std::array{"##body_pose_right_hip", "##body_pose_right_knee", "##body_pose_right_legs", "##body_pose_right_feet"},
+			};
+			for (size_t i = 0; i < pose_kinds.size() - 1; ++i)
+			{
+				const auto name = [i] {
+					switch (i)
+					{
+						case 0:
+							return _C("body pose profile", "Back");
+						case 1:
+							return _C("body pose profile", "Front");
+						case 2:
+							return _C("body pose profile", "Left side");
+						default:
+							return _C("body pose profile", "Right side");
+					}
+				}();
+				const auto profile_enabled = [body_setting_enabled, &config] {
+					return body_setting_enabled() && config.body_tracking.pose_assist.mode != wivrn::body_pose_assist_mode::off &&
+					       config.body_tracking.pose_assist.asset == wivrn::body_pose_asset_selection::procedural;
+				};
+				const auto add_profile_slider = [&](const char * suffix,
+				                                    std::string label,
+				                                    int min,
+				                                    int max,
+				                                    const char * format,
+				                                    auto getter,
+				                                    auto setter,
+				                                    int default_value) {
+					list.push_back({
+					        .id = suffix,
+					        .label = std::move(label),
+					        .description = _("Tune the synthesized profile used when this lying posture is active."),
+					        .ui = ui_kind::slider,
+					        .group = setting_group::tracking_pose_tuning,
+					        .get_int = [&, i, getter] { return getter(config.body_tracking.pose_assist.profiles[i]); },
+					        .set_int = [&, i, setter](int value) {
+				                setter(config.body_tracking.pose_assist.profiles[i], value);
+				                changed = true; },
+					        .v_min = min,
+					        .v_max = max,
+					        .fmt = format,
+					        .default_int = default_value,
+					        .enabled = profile_enabled,
+					        .disabled_tooltip = body_settings_tip,
+					});
+				};
+				add_profile_slider(profile_ids[i][0], std::format("{} hip height", name), 0, 500, "%d mm", [](const auto & p) { return int(p.hip_height_mm); }, [](auto & p, int value) { p.hip_height_mm = uint16_t(std::clamp(value, 0, 500)); }, default_config.body_tracking.pose_assist.profiles[i].hip_height_mm);
+				add_profile_slider(profile_ids[i][1], std::format("{} knee bend", name), 0, 150, "%d deg", [](const auto & p) { return int(p.knee_bend_deg); }, [](auto & p, int value) { p.knee_bend_deg = uint16_t(std::clamp(value, 0, 150)); }, default_config.body_tracking.pose_assist.profiles[i].knee_bend_deg);
+				add_profile_slider(profile_ids[i][2], std::format("{} leg spread", name), 0, 600, "%d mm", [](const auto & p) { return int(p.leg_spread_mm); }, [](auto & p, int value) { p.leg_spread_mm = uint16_t(std::clamp(value, 0, 600)); }, default_config.body_tracking.pose_assist.profiles[i].leg_spread_mm);
+				add_profile_slider(profile_ids[i][3], std::format("{} foot spread", name), 0, 500, "%d mm", [](const auto & p) { return int(p.foot_spread_mm); }, [](auto & p, int value) { p.foot_spread_mm = uint16_t(std::clamp(value, 0, 500)); }, default_config.body_tracking.pose_assist.profiles[i].foot_spread_mm);
+			}
+		}
+
 		if (ctx.in_game)
 		{
 			for (const auto & [scope, id, label, description]: {
 			             std::tuple{wivrn::body_tracking_reset::tracking, "##body_tracking_reset_tracking", _C("body tracking reset", "Reset tracking"), _("Clear the current tracking state and start tracking again.")},
 			             std::tuple{wivrn::body_tracking_reset::calibration, "##body_tracking_reset_calibration", _C("body tracking reset", "Reset calibration"), _("Clear the current calibration and request a new one.")},
+			             std::tuple{wivrn::body_tracking_reset::pose_alignment, "##body_tracking_reset_pose", _C("body tracking reset", "Realign lying pose"), _("Clear the current lying-pose alignment and classify it again.")},
 			             std::tuple{wivrn::body_tracking_reset::all, "##body_tracking_reset_all", _C("body tracking reset", "Reset all"), _("Clear tracking and calibration state.")},
-		             })
+			     })
 			{
 				list.push_back({
 				        .id = id,
 				        .label = label,
 				        .description = description,
 				        .ui = ui_kind::button,
+				        .group = setting_group::tracking_maintenance,
 				        .button_label = label,
 				        .on_click = [&ctx, scope] {
 					        if (ctx.on_body_tracking_reset)
-					                ctx.on_body_tracking_reset(scope);
-				        },
+					                ctx.on_body_tracking_reset(scope); },
 				        .enabled = [&ctx, scope, body_calibration_reset_supported] {
 					        const bool calibration_supported = scope != wivrn::body_tracking_reset::calibration ||
 					                                           body_calibration_reset_supported;
 					        return bool(ctx.on_body_tracking_reset) &&
-					               ctx.config.check_feature(feature::body_tracking) && calibration_supported;
-				        },
+					               ctx.config.check_feature(feature::body_tracking) && calibration_supported; },
 				        .disabled_tooltip = _("Body tracking reset is unavailable for this stream."),
 				});
 			}
 		}
 	}
 
-	ui::page_header(_cS("page header title", "Tracking"), _cS("page header subtitle", "Body and input tracking sent to the PC."));
-	render_settings(ctx, "##tracking", list);
+	ui::page_header(_cS("page header title", "Tracking"),
+	                _cS("page header subtitle", "Simple controls first; specialist tuning stays available when needed."));
+
+	auto select_group = [&list](setting_group group) {
+		std::vector<setting> selected;
+		for (const auto & item: list)
+			if (item.group == group)
+				selected.push_back(item);
+		return selected;
+	};
+	auto select_ids = [&list](std::initializer_list<std::string_view> ids) {
+		std::vector<setting> selected;
+		for (const auto id: ids)
+		{
+			const auto found = std::ranges::find_if(list, [id](const setting & item) {
+				return std::string_view(item.id) == id;
+			});
+			if (found != list.end())
+				selected.push_back(*found);
+		}
+		return selected;
+	};
+
+	static bool quick_open = false;
+	std::string pose_status = _C("body pose assist", "Unavailable");
+	ui::chip_style pose_status_style = ui::chip_style::muted;
+	const bool pose_assist_available = std::ranges::any_of(list, [](const setting & item) {
+		return std::string_view(item.id) == "##body_pose_assist_mode";
+	});
+	if (pose_assist_available)
+	{
+		switch (config.body_tracking.pose_assist.mode)
+		{
+			case wivrn::body_pose_assist_mode::off:
+				pose_status = _C("body pose assist", "Off");
+				break;
+			case wivrn::body_pose_assist_mode::automatic:
+				pose_status = _C("body pose assist", "Auto");
+				pose_status_style = ui::chip_style::accent;
+				break;
+			case wivrn::body_pose_assist_mode::manual:
+				pose_status = _C("body pose assist", "Manual");
+				pose_status_style = ui::chip_style::accent;
+				break;
+		}
+	}
+	ui::disclosure("##quick_tracking_disclosure",
+	               ICON_FA_BOLT,
+	               _C("tracking quick menu", "Quick tracking"),
+	               _("Common controls without the specialist parameters."),
+	               &quick_open,
+	               pose_status,
+	               pose_status_style);
+	if (quick_open)
+	{
+		const auto quick = select_ids({"##body",
+		                               "##body_pose_assist_mode",
+		                               "##body_pose_assist_asset",
+		                               "##body_motion_profile",
+		                               "##body_tracking_profile",
+		                               "##body_micro_motion_threshold",
+		                               "##body_tracking_reset_pose"});
+		if (not quick.empty())
+		{
+			ImGui::Dummy({0, ui::metrics::section_gap * 0.5f});
+			ImGui::PushID("quick_tracking");
+			render_settings(ctx, "##quick_tracking_card", quick);
+			ImGui::PopID();
+		}
+	}
+
+	ImGui::Dummy({0, ui::metrics::section_gap});
+	static int tracking_tab = 0;
+	const std::vector<std::string> tabs{
+	        _C("tracking tab", "General"),
+	        _C("tracking tab", "Body"),
+	        _C("tracking tab", "Lying poses"),
+	        _C("tracking tab", "Advanced"),
+	};
+	const float tabs_width = std::min(900.f, ImGui::GetContentRegionAvail().x);
+	ui::segmented("##tracking_tabs", tabs, &tracking_tab, {tabs_width, 0});
+	ImGui::Dummy({0, ui::metrics::section_gap});
+
+	auto render_group = [&](setting_group group,
+	                        const char * id,
+	                        const std::string & title,
+	                        const std::string & subtitle) {
+		auto group_settings = select_group(group);
+		if (group_settings.empty())
+			return;
+		ui::section_header(title, subtitle);
+		render_settings(ctx, id, group_settings);
+		ImGui::Dummy({0, ui::metrics::section_gap});
+	};
+
+	switch (tracking_tab)
+	{
+		case 0:
+			render_group(setting_group::tracking_general,
+			             "##tracking_general",
+			             _C("tracking section", "Input tracking"),
+			             _("Enable headset capabilities used for hands, gaze, and facial input."));
+			break;
+		case 1:
+			render_group(setting_group::tracking_body,
+			             "##tracking_body",
+			             _C("tracking section", "Body estimation"),
+			             _("Choose trackers and a behavior profile; presets hide low-level tuning."));
+			break;
+		case 2:
+			render_group(setting_group::tracking_lying,
+			             "##tracking_lying",
+			             _C("tracking section", "Pose detection"),
+			             _("Stabilize virtual trackers while reclining or lying on a support surface."));
+			break;
+		default:
+			render_group(setting_group::tracking_filters,
+			             "##tracking_filters",
+			             _C("tracking section", "Supervisor filters"),
+			             _("Expert confidence, smoothing, dropout, and prediction controls."));
+			render_group(setting_group::tracking_pose_tuning,
+			             "##tracking_pose_tuning",
+			             _C("tracking section", "Lying pose geometry"),
+			             _("Optional per-posture geometry for unusual body proportions or surfaces."));
+			render_group(setting_group::tracking_maintenance,
+			             "##tracking_maintenance",
+			             _C("tracking section", "Maintenance"),
+			             _("Clear only the state that needs to be recalculated."));
+			break;
+	}
 	if (changed)
 	{
 		config.save();
-		if (ctx.on_body_tracking_changed)
+		// Server-side supervisor/pose controls must not reapply Meta calibration
+		// APIs on the OpenXR tracking thread for every slider frame.
+		if (runtime_body_settings_changed && ctx.on_body_tracking_changed)
 			ctx.on_body_tracking_changed(config.body_tracking);
 	}
 	if (config.check_feature(feature::body_tracking) && config.body_part_mask == 0)
@@ -1231,7 +1647,10 @@ void settings_theme(const settings_context & ctx)
 			for (int i = 0; i < int(preset_list.size()); ++i)
 				if (preset_list[i].name == cfg.theme_preset)
 					return i;
-			return 1; // dark_default
+			for (int i = 0; i < int(preset_list.size()); ++i)
+				if (preset_list[i].name == "Hyprland")
+					return i;
+			return 0;
 		};
 		static int preset = f(config);
 		static const int preset_default = f(default_config);

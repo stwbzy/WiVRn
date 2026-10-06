@@ -1,10 +1,10 @@
 # FBT-E: full-body tracking
 
 This page uses **FBT-E** as a short name for the enhanced full-body-tracking
-plumbing in this branch. It is not a new OpenXR extension and it is not a
-WiVRn body-pose estimator. The headset runtime remains the source of body
-poses; WiVRn transports them, applies lifecycle guards, and exposes them to
-Monado.
+plumbing in this branch. It is not a new OpenXR extension or a camera/depth
+body-pose estimator. The headset runtime remains the source of the provider
+body poses; WiVRn transports them, applies lifecycle guards, and optionally
+adds a conservative HMD/grip-anchored lying-pose layer for virtual trackers.
 
 The status notes below describe the current checkout. They are deliberately
 explicit because the runtime supervisor is implemented, while a few advanced
@@ -58,8 +58,9 @@ the runtime, not to WiVRn.
 
 The persisted `body_tracking` object is part of `settings_changed` and has
 fixed-width enum values so a newer endpoint can reject or ignore an unknown
-choice safely. The default profile is `Balanced`, fidelity and calibration
-are `Auto`, and the new supervisor is `Off`.
+choice safely. The technical default profile is `Balanced`, the movement
+profile is `Current` (preserving the previous behavior), fidelity and
+calibration are `Auto`, and the new supervisor is `Off`.
 
 ### Profiles
 
@@ -93,6 +94,70 @@ invalid/missing pose. `floor_assist` only clamps a valid foot joint's output to
 `y >= 0` in WiVRn's floor-relative world; it does not estimate a floor, lower a
 raised foot, or fabricate a relation. Both options are bypassed when the
 supervisor is `Off`.
+
+### Lying pose assistance
+
+`pose_assist` is an optional postural layer that runs after per-joint
+supervision and before virtual trackers. It is intentionally separate from
+the OpenXR body device: by default, `get_body_joints` continues to expose the
+provider's body set unchanged, while enabled virtual trackers can use the
+assisted output.
+
+The layer keeps a short timestamped history of the headset and left/right grip
+poses. Automatic mode classifies `Upright`, `Back`, `Front`, or a side pose
+from head height relative to the selected floor/bed plane, torso direction,
+and head orientation. Manual mode selects one of the same postures. A
+hysteresis/transition timer prevents one frame from switching the whole body.
+When lying, chest/hip/knee/foot tracker relations are blended toward a
+profile-shaped template aligned to the HMD and a stable body axis derived from
+the controller span, provider hip, and headset heading. The template preserves
+torso/thigh/shin lengths, solves each leg independently, stacks rather than
+crosses the legs in side poses, and gives each lower-leg tracker its own bone
+orientation. Surface-height disagreements float the coherent template instead
+of vertically stretching it. Provider offsets and rotations are capped around
+that template before blending, so a malformed estimated leg cannot pull the
+assisted trackers into an impossible pose.
+Lower-body influence controls how much a provider leg can move the result;
+anchor confidence controls the confidence assigned to synthesized relations.
+Invalid provider legs therefore stop driving large jumps while HMD/controller
+anchors remain usable. A missing HMD anchor disables synthesis for that sample
+and the existing virtual-tracker dropout filter remains the final safety net.
+
+The Tracking page in the APK exposes mode, manual posture, support surface,
+bed height, transition time, influence/confidence sliders, and independent
+Back/Front/Left-side/Right-side hip, knee, leg-spread, and foot-spread
+profiles. **Realign lying pose** clears the server's pose state and anchor
+history without changing provider calibration. Status telemetry reports
+posture, confidence, anchor mask, and synthesized-joint fallback count.
+
+#### Portable Unity pose source
+
+`Pose source` selects either the original procedural templates or a validated
+portable pose exported from Unity. The first integrated asset is
+`Animation 25`, with UUID `unity.9b8a991000738a04d984a41268587e5a`, and is
+authored for the `Back` posture. Selecting it does not run Unity or load a
+VRChat avatar at runtime: the server consumes normalized anatomical targets,
+then rebuilds the legs with the measured torso, thigh, shin, pelvis, and foot
+lengths. The HMD and hand/controller history determine the coherent body frame;
+provider lower-body relations are used only as the source of the entry/exit
+blend. At full influence the custom solver is the sole writer for all six
+virtual tracker relations, preventing competition with normal FBT estimation.
+
+The bundled catalog is installed in `share/wivrn/poses`. A file with the same
+UUID in `$XDG_DATA_HOME/wivrn/poses`, or
+`~/.local/share/wivrn/poses` when `XDG_DATA_HOME` is unset, overrides it after a
+server restart. Files are limited to 256 KiB and 64 catalog entries; schema,
+units, category, finite bounds, normalized directions, and contact policy are
+validated before use. The APK sends only the bounded catalog selection, never
+a filesystem path or JSON payload. If an asset is absent, invalid, or not
+authored for the active posture, the server falls back to the procedural solver.
+Consequently, `Front` and side postures currently remain procedural even when
+`Animation 25` is selected.
+
+This first implementation does not replace the runtime body skeleton or run a
+camera/depth neural estimator. The `body_and_trackers` wire value is reserved
+for a future opt-in output mode; the current UI exposes the safe
+`virtual_trackers` behavior only.
 
 ### Fidelity: Auto, Low, High
 
@@ -274,13 +339,17 @@ Implemented behavior that is safe to rely on:
 - bounded positional prediction uses reported or Meta delta-derived linear
   velocity only, and floor assist clamps only valid feet below `y = 0`;
 - server reset and reconnect paths clear body history and virtual trackers;
+- lying-pose assistance is opt-in, uses HMD/grip anchors with transition
+  hysteresis, and only changes virtual tracker relations;
+- invalid or missing lower-body provider relations fall back to a bounded
+  posture template instead of being extrapolated as free-running trackers;
 - disabled virtual trackers remain present but return an untracked relation;
 - body reads use timestamped history and relation flags rather than inventing a
   pose when no valid provider sample exists.
 
 FBT-E does not currently:
 
-- estimate a skeleton from RGB, depth, IMU, controllers, or a camera;
+- estimate a skeleton from RGB, depth, IMU, or a camera;
 - run inverse kinematics or correct a provider's joint placement;
 - guarantee that a runtime's inferred body pose is physically accurate;
 - make Pico/HTC providers expose Meta calibration or fidelity status;
@@ -302,6 +371,24 @@ trackers required by the application. `Balanced` with `Filtered` is the
 general-purpose supervised default; choose `Off` only when comparing against
 the unsupervised provider relation.
 
+### Movement profiles and micro-motion filter
+
+The movement profile is independent from the technical
+`Stable/Balanced/Responsive/Custom` profile. `Current` is the default and
+deliberately leaves the existing technical policy unchanged. `Auto` classifies
+recent HMD, hand, and body-joint velocities with a 400 ms dwell before
+switching policy; `Sprint` favors fast movement and quick recovery, `Chill`
+favors rejection of brief noise and stronger smoothing, and `Flow` is tuned
+for expressive hand or head motion without the sprint limits. Switching
+profiles reconfigures the existing supervisors in place, so it does not erase
+a valid pose or trigger a calibration reset.
+
+The `Micro-motion filter` is a small positional dead zone for virtual
+trackers. While the body is otherwise still, displacements below the configured
+0-40 mm threshold are held at the last accepted position. The default is 6 mm;
+`Sprint` and active sprint detection reduce the dead zone, while lying-pose
+assistance bypasses it because that layer already emits a bounded trajectory.
+
 ## Tests
 
 The branch includes these focused tests when `WIVRN_BUILD_TEST=ON`:
@@ -312,15 +399,17 @@ The branch includes these focused tests when `WIVRN_BUILD_TEST=ON`:
 | `fbt-supervisor-test` | Validation, rejection reasons, hold expiry, hard loss, gated recovery, reordering, smoothing-safe output, Meta delta-velocity derivation, and reset |
 | `virtual-tracker-dropout-filter-test` | Existing 100 ms grace period, sustained invalid publication, recovery, and reordered samples |
 | `tracking-history-test` | Timestamped history/interpolation behavior used by Monado body reads |
+| `body-pose-assist` | Automatic/manual posture classification, transition hysteresis, anchor state, synthesis fallback, and passthrough |
+| `body-motion-classifier` | Movement classification hysteresis, fast/quiet profile transitions, and reconnect-gap handling |
 
 For a configured build tree:
 
 ```bash
 cmake --build build-server-no-system-boost -j4 \
   --target body-tracking-protocol-test fbt-supervisor-test \
-  virtual-tracker-dropout-filter-test tracking-history-test
+  virtual-tracker-dropout-filter-test tracking-history-test body-pose-assist-test
 ctest --test-dir build-server-no-system-boost --output-on-failure \
-  -R 'body-tracking-protocol|fbt-supervisor|virtual-tracker-dropout-filter|tracking-history'
+  -R 'body-tracking-protocol|fbt-supervisor|virtual-tracker-dropout-filter|tracking-history|body-pose-assist'
 ```
 
 These tests prove the isolated contracts and serialization. They do not

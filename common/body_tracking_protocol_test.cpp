@@ -42,6 +42,7 @@ void test_settings()
 	from_headset::settings_changed input{};
 	input.body_tracking = {
 	        .profile = body_tracking_profile::custom,
+	        .motion_profile = body_motion_profile::flow,
 	        .fidelity = body_tracking_fidelity::high,
 	        .calibration_mode = body_tracking_calibration_mode::manual,
 	        .supervisor = body_tracking_supervisor::server,
@@ -54,22 +55,43 @@ void test_settings()
 	        .prediction_ms = 8,
 	        .body_height_mm = 1780,
 	        .floor_assist = true,
+	        .micro_motion_threshold_mm = 9,
 	};
+	input.body_tracking.pose_assist.mode = body_pose_assist_mode::manual;
+	input.body_tracking.pose_assist.manual_pose = body_pose_kind::left_side;
+	input.body_tracking.pose_assist.surface = body_surface_mode::bed;
+	input.body_tracking.pose_assist.asset = body_pose_asset_selection::unity_animation_25;
+	input.body_tracking.pose_assist.bed_height_mm = 520;
+	input.body_tracking.pose_assist.transition_ms = 700;
+	input.body_tracking.pose_assist.lower_body_influence_permille = 180;
+	input.body_tracking.pose_assist.anchor_influence_permille = 920;
+	input.body_tracking.pose_assist.profiles[2].knee_bend_deg = 42;
 
 	const auto output = roundtrip(input);
 	assert(output.body_tracking.profile == body_tracking_profile::custom);
+	assert(output.body_tracking.motion_profile == body_motion_profile::flow);
 	assert(output.body_tracking.fidelity == body_tracking_fidelity::high);
 	assert(output.body_tracking.calibration_mode == body_tracking_calibration_mode::manual);
 	assert(output.body_tracking.supervisor_path == body_tracking_supervisor_path::raw);
 	assert(output.body_tracking.body_height_mm == 1780);
 	assert(output.body_tracking.floor_assist);
+	assert(output.body_tracking.micro_motion_threshold_mm == 9);
+	assert(output.body_tracking.pose_assist.mode == body_pose_assist_mode::manual);
+	assert(output.body_tracking.pose_assist.manual_pose == body_pose_kind::left_side);
+	assert(output.body_tracking.pose_assist.surface == body_surface_mode::bed);
+	assert(output.body_tracking.pose_assist.asset == body_pose_asset_selection::unity_animation_25);
+	assert(output.body_tracking.pose_assist.bed_height_mm == 520);
+	assert(output.body_tracking.pose_assist.transition_ms == 700);
+	assert(output.body_tracking.pose_assist.lower_body_influence_permille == 180);
+	assert(output.body_tracking.pose_assist.anchor_influence_permille == 920);
+	assert(output.body_tracking.pose_assist.profiles[2].knee_bend_deg == 42);
 }
 
 void test_reset_and_epoch()
 {
 	from_headset::body_tracking_reset_request request{
 	        .request_id = 42,
-	        .reset = body_tracking_reset::calibration,
+	        .reset = body_tracking_reset::pose_alignment,
 	        .body_epoch = 17,
 	        .connection_generation = 9,
 	};
@@ -77,6 +99,7 @@ void test_reset_and_epoch()
 	assert(request_copy.request_id == 42);
 	assert(request_copy.body_epoch == 17);
 	assert(request_copy.connection_generation == 9);
+	assert(request_copy.reset == body_tracking_reset::pose_alignment);
 
 	to_headset::body_tracking_reset_ack ack{
 	        .request_id = request.request_id,
@@ -104,6 +127,10 @@ void test_status_defaults()
 	assert(status.held == 0);
 	assert(status.body_epoch == 0);
 	assert(status.connection_generation == 0);
+	assert(status.pose_state == body_pose_state::disabled);
+	assert(status.pose_confidence_permille == 0);
+	assert(status.pose_anchor_mask == 0);
+	assert(status.pose_fallbacks == 0);
 }
 
 void test_effective_body_metadata()

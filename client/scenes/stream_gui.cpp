@@ -402,10 +402,10 @@ void scenes::stream::gui_compact_view()
 		f(_S("Headset synthesis cost"), headset_synthesis_gpu_time.load() * 1000, "ms");
 		text(_S("Headset frames (real / generated / pose-only / rejected)"),
 		     fmt::format("{} / {} / {} / {}",
-		                  headset_real_frame_count.load(),
-		                  headset_generated_frame_count.load(),
-		                  headset_pose_only_frame_count.load(),
-		                  headset_rejected_frame_count.load()));
+		                 headset_real_frame_count.load(),
+		                 headset_generated_frame_count.load(),
+		                 headset_pose_only_frame_count.load(),
+		                 headset_rejected_frame_count.load()));
 		f(_S("Optical flow"), telemetry.optical_flow_ms, "ms");
 		f(_S("Missed intervals"), telemetry.missed_interval_percent, "%");
 		const auto client_fallback = client_scaling_fallback_reason.load();
@@ -427,6 +427,10 @@ void scenes::stream::gui_compact_view()
 			                 magic_enum::enum_name(body->fidelity)));
 			text(_S("Body samples (accepted / rejected / held)"),
 			     fmt::format("{} / {} / {}", body->accepted, body->rejected, body->held));
+			text(_S("Lying pose / confidence"),
+			     fmt::format("{} / {}%", magic_enum::enum_name(body->pose_state), body->pose_confidence_permille / 10));
+			text(_S("Pose anchors / fallbacks"),
+			     fmt::format("0x{:x} / {}", body->pose_anchor_mask, body->pose_fallbacks));
 			text(_S("Body epoch"), fmt::format("{}", body->body_epoch));
 		}
 		ImGui::EndTable();
@@ -442,10 +446,10 @@ static void send_settings_changed_packet(xr::session & session, wivrn_session * 
 	                .frame_synthesis = config.frame_synthesis,
 	                .frame_synthesis_backend = config.frame_synthesis_backend,
 	                .bitrate_bps = config.bitrate_bps,
-		                .mirror_gamepad = config.forward_gamepad,
-		                .enabled_body_parts = config.body_part_mask,
-		                .body_tracking = config.body_tracking,
-		        });
+	                .mirror_gamepad = config.forward_gamepad,
+	                .enabled_body_parts = config.body_part_mask,
+	                .body_tracking = config.body_tracking,
+	        });
 }
 
 void scenes::stream::gui_settings(float)
@@ -462,12 +466,10 @@ void scenes::stream::gui_settings(float)
 	        .recommended_height = height,
 	        .in_game = true,
 	        .server_hid_forwarding = hid_forwarding_enabled(),
-		        .on_streaming_changed = [this] { send_settings_changed_packet(session, network_session.get(), application::get_config()); },
-		        .on_body_tracking_changed = [this](const wivrn::body_tracking_settings &) {
-			        apply_body_tracking_settings_requested.store(true, std::memory_order_release); },
-		        .on_body_tracking_reset = [this](wivrn::body_tracking_reset scope) {
-			        request_body_tracking_reset(scope); },
-		        .enter_foveation_adjust = [this] { next_gui_status = stream_tab::foveation_settings; },
+	        .on_streaming_changed = [this] { send_settings_changed_packet(session, network_session.get(), application::get_config()); },
+	        .on_body_tracking_changed = [this](const wivrn::body_tracking_settings &) { apply_body_tracking_settings_requested.store(true, std::memory_order_release); },
+	        .on_body_tracking_reset = [this](wivrn::body_tracking_reset scope) { request_body_tracking_reset(scope); },
+	        .enter_foveation_adjust = [this] { next_gui_status = stream_tab::foveation_settings; },
 	        .on_foveation_override_changed = [this] {
 		        const auto & config = application::get_config();
 		        override_foveation_enable = config.override_foveation_enable;
@@ -817,19 +819,11 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 	const float content_margin = wivrn::ui::metrics::content_margin;
 	const ImVec2 margin_around_window{50, 50};
 
-	ImGuiStyle & style = ImGui::GetStyle();
 	imgui_ctx->new_frame(predicted_display_time);
 
-	// theme the shared cards like the lobby, widget hooks are global so re-point at this scene
-	style.FontScaleMain = wivrn::ui::current().font_scale * wivrn::ui::metrics::font_base;
-	style.WindowRounding = wivrn::ui::current().card_rounding;
-	style.ChildRounding = wivrn::ui::current().card_rounding;
-	style.PopupRounding = wivrn::ui::current().card_rounding;
-	style.FrameRounding = wivrn::ui::current().rounding;
-	style.GrabRounding = wivrn::ui::current().rounding;
-	style.TabRounding = wivrn::ui::current().rounding;
-	style.Colors[ImGuiCol_Text] = wivrn::ui::current().text;
-	style.Colors[ImGuiCol_TextDisabled] = wivrn::ui::current().text_muted;
+	// Keep the in-stream menu visually identical to the lobby. This is the only
+	// style mutation here; tracking/rendering code remains untouched.
+	wivrn::ui::current().apply();
 	wivrn::ui::set_popup_center(imgui_ctx->layers()[2].vp_center(), float(imgui_ctx->layers()[2].vp_size.y));
 	wivrn::ui::set_hover_haptic([this] { imgui_ctx->vibrate_on_hover(); });
 	wivrn::ui::set_tooltip_hook([this](const char * text) { imgui_ctx->tooltip(text); });
@@ -1071,7 +1065,7 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 			if (wivrn::ui::nav_item(ICON_FA_COMPUTER, _S("Statistics"), gui_status == stream_tab::stats))
 				next_gui_status = stream_tab::stats;
 
-			wivrn::ui::nav_section(_cS("tab group", "SETTINGS"));
+			wivrn::ui::nav_section(_cS("tab group", "CONFIGURATION"));
 			auto settings_item = [&](const char * icon, const std::string & label, settings_page page) {
 				if (wivrn::ui::nav_item(icon, label, gui_status == stream_tab::settings and current_settings_page == page))
 				{
@@ -1079,14 +1073,38 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 					next_gui_status = stream_tab::settings;
 				}
 			};
-			settings_item(ICON_FA_IMAGE, _cS("tab label", "Video"), settings_page::video);
-			settings_item(ICON_FA_VOLUME_HIGH, _cS("tab label", "Audio"), settings_page::audio);
 			settings_item(ICON_FA_TOWER_BROADCAST, _cS("tab label", "Streaming"), settings_page::streaming);
-			settings_item(ICON_FA_WAND_MAGIC_SPARKLES, _cS("tab label", "Post-processing"), settings_page::post_processing);
-			settings_item(ICON_FA_KEYBOARD, _cS("tab label", "Devices"), settings_page::devices);
+
+			static bool visual_open = false;
+			const bool visual_selected = gui_status == stream_tab::settings &&
+			                             (current_settings_page == settings_page::video ||
+			                              current_settings_page == settings_page::post_processing);
+			if (wivrn::ui::nav_item(ICON_FA_IMAGE, _cS("tab label", "Visual"), visual_selected))
+			{
+				if (not visual_selected)
+				{
+					current_settings_page = settings_page::video;
+					next_gui_status = stream_tab::settings;
+				}
+				visual_open = not visual_selected || not visual_open;
+			}
+			if (visual_open)
+			{
+				ImGui::Indent(22);
+				settings_item(ICON_FA_SLIDERS, _cS("tab label", "Rendering"), settings_page::video);
+				settings_item(ICON_FA_WAND_MAGIC_SPARKLES,
+				              _cS("tab label", "Post-processing"),
+				              settings_page::post_processing);
+				ImGui::Unindent(22);
+			}
+
 			settings_item(ICON_FA_LOCATION_CROSSHAIRS, _cS("tab label", "Tracking"), settings_page::tracking);
+			settings_item(ICON_FA_VOLUME_HIGH, _cS("tab label", "Audio"), settings_page::audio);
+			settings_item(ICON_FA_KEYBOARD, _cS("tab label", "Devices"), settings_page::devices);
+
+			wivrn::ui::nav_section(_cS("tab group", "SYSTEM"));
 			settings_item(ICON_FA_GEARS, _cS("tab label", "System"), settings_page::system);
-			settings_item(ICON_FA_PALETTE, _cS("tab label", "Theme"), settings_page::theme);
+			settings_item(ICON_FA_PALETTE, _cS("tab label", "Appearance"), settings_page::theme);
 
 			// pinned to the bottom
 			wivrn::ui::sidebar_footer();

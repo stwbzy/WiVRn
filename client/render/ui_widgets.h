@@ -123,6 +123,19 @@ enum class chip_style
 // height overrides the pill height, default sizes to text + padding
 void chip(const std::string & label, chip_style style = chip_style::neutral, bool dot = false, float height = 0);
 
+// Compact page section heading used above one logical card group.
+void section_header(const std::string & title, const std::string & subtitle = {});
+
+// Full-width collapsible submenu header. The status remains visible while
+// collapsed, so common state can be checked without opening an advanced page.
+bool disclosure(const char * id,
+                const char * icon,
+                const std::string & title,
+                const std::string & subtitle,
+                bool * open,
+                const std::string & status = {},
+                chip_style status_style = chip_style::neutral);
+
 // Muted sidebar group header
 void nav_section(const std::string & label);
 

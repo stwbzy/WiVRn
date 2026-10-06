@@ -41,6 +41,7 @@
 #include "xrt/xrt_results.h"
 #include "xrt/xrt_system.h"
 #include <atomic>
+#include <deque>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -63,6 +64,17 @@ class wivrn_htc_face_tracker;
 class wivrn_body_tracker;
 class wivrn_generic_tracker;
 struct audio_device;
+
+struct body_anchor_sample
+{
+	int64_t timestamp_ns = 0;
+	xrt_space_relation head{};
+	xrt_space_relation left_hand{};
+	xrt_space_relation right_hand{};
+	bool head_valid = false;
+	bool left_hand_valid = false;
+	bool right_hand_valid = false;
+};
 
 class wivrn_session : public xrt_system_devices
 {
@@ -110,6 +122,8 @@ class wivrn_session : public xrt_system_devices
 	std::optional<wivrn_fb_face2_tracker> fb_face2_tracker;
 	std::optional<wivrn_htc_face_tracker> htc_face_tracker;
 	std::optional<wivrn_body_tracker> body_tracker;
+	mutable std::mutex body_anchor_mutex;
+	std::deque<body_anchor_sample> body_anchor_history;
 	beman::inplace_vector::inplace_vector<wivrn_generic_tracker, from_headset::htc_body::max_tracked_poses> generic_trackers;
 	std::optional<wivrn_uinput> uinput_handler;
 	bool gamepad_connected = false; // network thread only
@@ -211,6 +225,7 @@ public:
 
 	void add_tracking_request(device_id, int64_t at_ns, int64_t produced_ns, int64_t now);
 	void add_tracking_request(device_id, int64_t at_ns, int64_t produced_ns);
+	std::optional<body_anchor_sample> get_body_anchors(int64_t timestamp_ns) const;
 
 	void operator()(from_headset::crypto_handshake &&) {}
 	void operator()(from_headset::pin_check_1 &&) {}
@@ -286,6 +301,7 @@ private:
 	bool accept_packet_generation(uint64_t);
 	bool accept_body_epoch(uint64_t epoch);
 	void reset_body_tracking_state(uint64_t epoch);
+	void record_body_anchors(const from_headset::tracking & tracking);
 	void report_body_tracking_status(bool force = false);
 	void report_counters();
 

@@ -14,6 +14,21 @@ This branch is an experimental WiVRn fork focused on a smoother and more
 resilient PCVR experience while remaining compatible with multiple headsets
 and OpenXR applications.
 
+### Isolated Roblox VR Experiment
+
+This fork also contains an [isolated Roblox VR launcher](experimental/launcher/README.md)
+built against the pinned, Apache-2.0-licensed [Mocktail VR host](https://github.com/komaruworld/mocktail/tree/vr).
+It is a separate application, not a source fork of Sober or an official Roblox,
+Sober, or WiVRn release. The WiVRn history and existing custom headset/FBT work
+are retained; the original work directory is not modified.
+
+Real stereoscopic gameplay, home-only recentering, pointer alignment and the
+balanced resolution profile have been confirmed on Quest 3S with WiVRn 26.9.
+Avatar hand orientation and frame pacing remain known issues. See
+[pending hotfixes](docs/roblox-vr-hotfixes.md) and
+[source provenance and third-party notices](experimental/THIRD_PARTY_NOTICES.md).
+No Roblox APK/ELF, credentials, private state or raw session logs are versioned.
+
 ### Highlights
 
 - **General improvements:** deterministic connection states, clean voluntary

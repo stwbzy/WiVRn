@@ -115,17 +115,19 @@ constexpr float chip_pill_padding_x = 18; // roomier horizontal padding for top-
 constexpr float input_padding_x = 14;     // horizontal text padding inside inputs
 constexpr float font_modal_title = 1.2;   // modal heading, x base font size
 
-constexpr float label_line_gap = 5;   // title to description
-constexpr float label_bottom_pad = 6; // breathing room below the description
-constexpr float nav_section_gap = 18; // space above a sidebar section header
+constexpr float label_line_gap = 5;       // title to description
+constexpr float label_bottom_pad = 6;     // breathing room below the description
+constexpr float nav_section_gap = 18;     // space above a sidebar section header
+constexpr float section_gap = 16;         // page section heading to its card
+constexpr float disclosure_height = 2.35; // x frame height, large VR touch target
 
 constexpr ImVec2 card_item_spacing = {12, 10}; // ItemSpacing pushed around a card section
 constexpr float setting_control_width = 480;   // width of the control in a setting row
 
 // application shell: top bar, sidebar, content panel, shared by lobby and in-stream window
-constexpr float sidebar_width = 300;
-constexpr float top_bar_height = 72;
-constexpr float content_margin = 20; // gap around the main content panel
+constexpr float sidebar_width = 312;
+constexpr float top_bar_height = 78;
+constexpr float content_margin = 24; // gap around the main content panel
 
 // application launcher grid
 constexpr float app_icon_small = 120;

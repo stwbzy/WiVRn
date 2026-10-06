@@ -1,0 +1,7 @@
+# Publish reviewed reports and diagnostic source, not raw execution artifacts.
+*
+!*/
+!.gitignore
+!*.md
+!*.c
+!*.sh

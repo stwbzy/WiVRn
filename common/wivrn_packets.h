@@ -48,7 +48,7 @@ namespace wivrn
 // protocol.  Keep the revision in lock-step with those fields: unlike the
 // schema hash this number is also useful when diagnosing a mismatched pair of
 // endpoints before a packet is exchanged.
-static constexpr int protocol_revision = 3;
+static constexpr int protocol_revision = 6;
 
 enum class device_id : uint8_t
 {
@@ -282,6 +282,18 @@ enum class body_tracking_profile : uint8_t
 	custom,
 };
 
+// Movement intent is separate from the technical tracking profile above. The
+// `current` value is deliberately the default and preserves the existing
+// Balanced policy for users who do not opt into adaptive movement handling.
+enum class body_motion_profile : uint8_t
+{
+	current,
+	automatic,
+	sprint,
+	chill,
+	flow,
+};
+
 enum class body_tracking_fidelity : uint8_t
 {
 	automatic,
@@ -355,7 +367,86 @@ enum class body_tracking_reset : uint8_t
 	none,
 	calibration,
 	tracking,
+	pose_alignment,
 	all,
+};
+
+// Posture assistance is a server-side fusion layer for virtual body trackers.
+// It intentionally remains separate from the per-joint supervisor above: the
+// supervisor validates individual samples while this mode reasons about the
+// whole body and the user's support surface.
+enum class body_pose_assist_mode : uint8_t
+{
+	off,
+	automatic,
+	manual,
+};
+
+enum class body_pose_kind : uint8_t
+{
+	upright,
+	back,
+	front,
+	left_side,
+	right_side,
+};
+
+enum class body_surface_mode : uint8_t
+{
+	floor,
+	bed,
+};
+
+enum class body_pose_output : uint8_t
+{
+	virtual_trackers,
+	body_and_trackers,
+};
+
+// The packet carries a bounded catalog selection, never a filesystem path or
+// user-provided JSON. Servers map it to a validated local pose UUID.
+enum class body_pose_asset_selection : uint8_t
+{
+	procedural,
+	unity_animation_25,
+};
+
+enum class body_pose_state : uint8_t
+{
+	disabled,
+	upright,
+	transitioning,
+	back,
+	front,
+	left_side,
+	right_side,
+	uncertain,
+};
+
+struct body_pose_profile
+{
+	// The profile describes the lower-body shape relative to the support plane.
+	// Values are deliberately bounded by both the UI and the server normalizer.
+	uint16_t hip_height_mm = 130;
+	uint16_t knee_bend_deg = 70;
+	uint16_t leg_spread_mm = 180;
+	uint16_t foot_spread_mm = 120;
+	bool operator==(const body_pose_profile &) const = default;
+};
+
+struct body_pose_assist_settings
+{
+	body_pose_assist_mode mode = body_pose_assist_mode::off;
+	body_pose_kind manual_pose = body_pose_kind::back;
+	body_surface_mode surface = body_surface_mode::floor;
+	body_pose_output output = body_pose_output::virtual_trackers;
+	body_pose_asset_selection asset = body_pose_asset_selection::procedural;
+	uint16_t bed_height_mm = 450;
+	uint16_t transition_ms = 450;
+	uint16_t lower_body_influence_permille = 250;
+	uint16_t anchor_influence_permille = 800;
+	std::array<body_pose_profile, 4> profiles{}; // back, front, left, right
+	bool operator==(const body_pose_assist_settings &) const = default;
 };
 
 // Short aliases are useful to code that deals with FBT as a protocol feature,
@@ -371,6 +462,7 @@ using body_tracking_path = body_tracking_supervisor_path;
 struct body_tracking_settings
 {
 	body_tracking_profile profile = body_tracking_profile::balanced;
+	body_motion_profile motion_profile = body_motion_profile::current;
 	body_tracking_fidelity fidelity = body_tracking_fidelity::automatic;
 	body_tracking_calibration_mode calibration_mode = body_tracking_calibration_mode::automatic;
 	body_tracking_supervisor supervisor = body_tracking_supervisor::off;
@@ -383,6 +475,8 @@ struct body_tracking_settings
 	uint16_t prediction_ms = 0;
 	std::optional<uint16_t> body_height_mm = {};
 	bool floor_assist = false;
+	uint16_t micro_motion_threshold_mm = 6;
+	body_pose_assist_settings pose_assist{};
 };
 
 enum class stream_tab : uint8_t
@@ -408,6 +502,7 @@ struct audio_data
 namespace from_headset
 {
 using body_tracking_profile = wivrn::body_tracking_profile;
+using body_motion_profile = wivrn::body_motion_profile;
 using body_tracking_fidelity = wivrn::body_tracking_fidelity;
 using body_tracking_calibration_mode = wivrn::body_tracking_calibration_mode;
 using body_tracking_calibration_state = wivrn::body_tracking_calibration_state;
@@ -418,6 +513,14 @@ using body_tracking_supervisor_state = wivrn::body_tracking_supervisor_state;
 using body_tracking_supervisor_reason = wivrn::body_tracking_supervisor_reason;
 using body_tracking_reset = wivrn::body_tracking_reset;
 using body_tracking_settings = wivrn::body_tracking_settings;
+using body_pose_assist_mode = wivrn::body_pose_assist_mode;
+using body_pose_kind = wivrn::body_pose_kind;
+using body_surface_mode = wivrn::body_surface_mode;
+using body_pose_output = wivrn::body_pose_output;
+using body_pose_asset_selection = wivrn::body_pose_asset_selection;
+using body_pose_state = wivrn::body_pose_state;
+using body_pose_profile = wivrn::body_pose_profile;
+using body_pose_assist_settings = wivrn::body_pose_assist_settings;
 
 struct crypto_handshake
 {
@@ -1007,6 +1110,7 @@ namespace to_headset
 {
 
 using body_tracking_profile = wivrn::body_tracking_profile;
+using body_motion_profile = wivrn::body_motion_profile;
 using body_tracking_fidelity = wivrn::body_tracking_fidelity;
 using body_tracking_calibration_mode = wivrn::body_tracking_calibration_mode;
 using body_tracking_calibration_state = wivrn::body_tracking_calibration_state;
@@ -1017,6 +1121,14 @@ using body_tracking_supervisor_state = wivrn::body_tracking_supervisor_state;
 using body_tracking_supervisor_reason = wivrn::body_tracking_supervisor_reason;
 using body_tracking_reset = wivrn::body_tracking_reset;
 using body_tracking_settings = wivrn::body_tracking_settings;
+using body_pose_assist_mode = wivrn::body_pose_assist_mode;
+using body_pose_kind = wivrn::body_pose_kind;
+using body_surface_mode = wivrn::body_surface_mode;
+using body_pose_output = wivrn::body_pose_output;
+using body_pose_asset_selection = wivrn::body_pose_asset_selection;
+using body_pose_state = wivrn::body_pose_state;
+using body_pose_profile = wivrn::body_pose_profile;
+using body_pose_assist_settings = wivrn::body_pose_assist_settings;
 
 struct crypto_handshake
 {
@@ -1239,6 +1351,10 @@ struct body_tracking_status
 	uint64_t held = 0;
 	uint64_t body_epoch = 0;
 	uint64_t connection_generation = 0;
+	body_pose_state pose_state = body_pose_state::disabled;
+	uint16_t pose_confidence_permille = 0;
+	uint16_t pose_anchor_mask = 0;
+	uint64_t pose_fallbacks = 0;
 };
 
 struct runtime_telemetry

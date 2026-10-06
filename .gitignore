@@ -22,3 +22,12 @@ gradle.properties
 local.properties
 compile_commands.json
 !libopenxr_loader.so
+
+# Local credentials, diagnostics and proprietary payloads are never source.
+.env
+.env.*
+*.log
+*.apk
+*.aab
+*.pem
+*.key

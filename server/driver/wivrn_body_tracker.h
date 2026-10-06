@@ -20,18 +20,22 @@
 
 #pragma once
 
+#include "body_pose_assist.h"
 #include "driver/wivrn_generic_tracker.h"
 #include "utils/thread_safe.h"
 #include "xrt/xrt_defines.h"
 #include "xrt/xrt_device.h"
 
-#include "history.h"
+#include "body_motion_classifier.h"
 #include "fbt_supervisor.h"
+#include "history.h"
 #include "pose_list.h"
 #include "wivrn_packets.h"
 
 #include <atomic>
+#include <optional>
 #include <unordered_map>
+#include <vector>
 
 namespace wivrn
 {
@@ -70,11 +74,24 @@ class wivrn_body_tracker : public xrt_device
 	from_headset::body_tracking_fidelity effective_fidelity = from_headset::body_tracking_fidelity::automatic;
 	bool supervisor_configured = false;
 	bool body_active = false;
+	body_pose_assist pose_assist;
+	body_motion_classifier motion_classifier;
+	body_motion_state active_motion_state = body_motion_state::unknown;
+	std::vector<xrt_space_relation> micro_motion_relations;
+	bool micro_motion_initialized = false;
 
 	uint32_t joint_count() const;
 	bool is_foot_joint(uint32_t joint) const;
 	xrt_space_relation supervise_joint(uint32_t joint, int64_t timestamp_ns, const xrt_space_relation & relation, float confidence);
 	void configure_supervisors(const from_headset::body_tracking_settings & settings);
+	std::array<std::optional<uint32_t>, body_pose_role_count> pose_role_joints() const;
+	void update_virtual_trackers(const std::vector<xrt_space_relation> & relations,
+	                             XrTime production_timestamp,
+	                             int64_t timestamp_ns,
+	                             float provider_confidence,
+	                             const clock_offset & offset,
+	                             bool calibration_blocks_output = false);
+	void apply_motion_policy();
 
 protected:
 	// key is joint
