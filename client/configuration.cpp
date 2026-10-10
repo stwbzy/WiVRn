@@ -233,6 +233,8 @@ config_field body_tracking_field()
 		        json << ",\"body_tracking_settings\":{";
 		        json << "\"profile\":";
 		        write_value(json, settings.profile);
+		        json << ",\"motion_profile\":";
+		        write_value(json, settings.motion_profile);
 		        json << ",\"fidelity\":";
 		        write_value(json, settings.fidelity);
 		        json << ",\"calibration_mode\":";
@@ -250,6 +252,33 @@ config_field body_tracking_field()
 		        if (settings.body_height_mm)
 		                json << ",\"body_height_mm\":" << *settings.body_height_mm;
 		        json << ",\"floor_assist\":" << std::boolalpha << settings.floor_assist;
+		        const auto & pose = settings.pose_assist;
+		        json << ",\"pose_assist\":{\"mode\":";
+		        write_value(json, pose.mode);
+		        json << ",\"manual_pose\":";
+		        write_value(json, pose.manual_pose);
+		        json << ",\"surface\":";
+		        write_value(json, pose.surface);
+		        json << ",\"output\":";
+		        write_value(json, pose.output);
+		        json << ",\"asset\":";
+		        write_value(json, pose.asset);
+		        json << ",\"bed_height_mm\":" << pose.bed_height_mm;
+		        json << ",\"transition_ms\":" << pose.transition_ms;
+		        json << ",\"lower_body_influence_permille\":" << pose.lower_body_influence_permille;
+		        json << ",\"anchor_influence_permille\":" << pose.anchor_influence_permille;
+		        json << ",\"profiles\":[";
+		        for (size_t i = 0; i < pose.profiles.size(); ++i)
+		        {
+		                if (i != 0)
+		                        json << ",";
+		                const auto & profile = pose.profiles[i];
+		                json << "{\"hip_height_mm\":" << profile.hip_height_mm;
+		                json << ",\"knee_bend_deg\":" << profile.knee_bend_deg;
+		                json << ",\"leg_spread_mm\":" << profile.leg_spread_mm;
+		                json << ",\"foot_spread_mm\":" << profile.foot_spread_mm << "}";
+		        }
+		        json << "]}";
 		        json << "}"; },
 	        .load = [](simdjson::dom::element root, configuration & c) {
 		        // Older versions used body_tracking for this object, which collided
@@ -266,6 +295,8 @@ config_field body_tracking_field()
 		                auto settings = c.body_tracking;
 		                if (auto value = read_value<wivrn::body_tracking_profile>(object["profile"]))
 		                        settings.profile = *value;
+		                if (auto value = read_value<wivrn::body_motion_profile>(object["motion_profile"]))
+		                        settings.motion_profile = *value;
 		                if (auto value = read_value<wivrn::body_tracking_fidelity>(object["fidelity"]))
 		                        settings.fidelity = *value;
 		                if (auto value = read_value<wivrn::body_tracking_calibration_mode>(object["calibration_mode"]))
@@ -290,6 +321,52 @@ config_field body_tracking_field()
 		                        settings.body_height_mm = *value;
 		                if (auto value = read_value<bool>(object["floor_assist"]))
 		                        settings.floor_assist = *value;
+		                if (auto value = read_bounded_u16(object["micro_motion_threshold_mm"], 0, 40))
+		                        settings.micro_motion_threshold_mm = *value;
+		                if (auto pose_object = object["pose_assist"]; pose_object.is_object())
+		                {
+		                        auto pose = settings.pose_assist;
+		                        if (auto value = read_value<wivrn::body_pose_assist_mode>(pose_object["mode"]))
+		                                pose.mode = *value;
+		                        if (auto value = read_value<wivrn::body_pose_kind>(pose_object["manual_pose"]))
+		                                pose.manual_pose = *value;
+		                        if (auto value = read_value<wivrn::body_surface_mode>(pose_object["surface"]))
+		                                pose.surface = *value;
+		                        if (auto value = read_value<wivrn::body_pose_output>(pose_object["output"]))
+		                                pose.output = *value;
+		                        if (auto value = read_value<wivrn::body_pose_asset_selection>(pose_object["asset"]))
+		                                pose.asset = *value;
+		                        if (auto value = read_bounded_u16(pose_object["bed_height_mm"], 0, 1500))
+		                                pose.bed_height_mm = *value;
+		                        if (auto value = read_bounded_u16(pose_object["transition_ms"], 50, 2000))
+		                                pose.transition_ms = *value;
+		                        if (auto value = read_bounded_u16(pose_object["lower_body_influence_permille"], 0, 1000))
+		                                pose.lower_body_influence_permille = *value;
+		                        if (auto value = read_bounded_u16(pose_object["anchor_influence_permille"], 0, 1000))
+		                                pose.anchor_influence_permille = *value;
+		                        size_t profile_index = 0;
+		                        if (auto profiles = pose_object["profiles"]; profiles.is_array())
+		                        {
+		                                for (auto profile_value: profiles.get_array())
+		                                {
+		                                        if (profile_index >= pose.profiles.size())
+		                                                break;
+		                                        if (!profile_value.is_object())
+		                                                continue;
+		                                        const auto profile_object = profile_value.get_object();
+		                                        auto & profile = pose.profiles[profile_index++];
+		                                        if (auto value = read_bounded_u16(profile_object["hip_height_mm"], 0, 500))
+		                                                profile.hip_height_mm = *value;
+		                                        if (auto value = read_bounded_u16(profile_object["knee_bend_deg"], 0, 150))
+		                                                profile.knee_bend_deg = *value;
+		                                        if (auto value = read_bounded_u16(profile_object["leg_spread_mm"], 0, 600))
+		                                                profile.leg_spread_mm = *value;
+		                                        if (auto value = read_bounded_u16(profile_object["foot_spread_mm"], 0, 500))
+		                                                profile.foot_spread_mm = *value;
+		                                }
+		                        }
+		                        settings.pose_assist = pose;
+		                }
 		                c.body_tracking = settings;
 		                loaded = true;
 		        };
@@ -304,8 +381,7 @@ config_field body_tracking_field()
 		                c.body_tracking_settings_migrated = true;
 		                if (!has_canonical && !loaded)
 		                        load_settings(member.value);
-		        }
-	        },
+		        } },
 	};
 }
 } // namespace

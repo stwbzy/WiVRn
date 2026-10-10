@@ -64,6 +64,43 @@ static theme dark_default()
 	return t;
 }
 
+// Solid system-panel palette. It keeps the Hyprland-inspired precision while
+// reserving cyan for interaction and semantic colours for actual status.
+static theme hyprland()
+{
+	theme t = dark_default();
+	t.name = "Hyprland";
+	t.localized_name = _C("theme name", "Hyprland");
+
+	t.accent = rgb(85, 199, 232);
+	t.accent_hovered = rgb(114, 214, 242);
+	t.accent_active = rgb(54, 169, 206);
+	t.on_accent = rgb(16, 21, 28);
+
+	t.background = rgb(16, 21, 28);
+	t.card = rgb(23, 30, 39);
+	t.card_hovered = rgb(29, 38, 49);
+	t.control = rgb(32, 41, 52);
+	t.control_hovered = rgb(40, 52, 65);
+	t.control_active = rgb(48, 64, 80);
+
+	t.text = rgb(242, 245, 247);
+	t.text_muted = rgb(154, 167, 180);
+	t.border = rgb(48, 59, 72);
+
+	t.danger = rgb(232, 120, 136);
+	t.danger_hovered = rgb(242, 145, 158);
+	t.success = rgb(120, 214, 156);
+	t.warning = rgb(231, 183, 94);
+
+	t.dimming = rgb(8, 11, 15, 0.72f);
+	t.rounding = 8;
+	t.card_rounding = 12;
+	t.border_size = 1;
+	t.font_scale = 1.0;
+	return t;
+}
+
 static theme midnight()
 {
 	theme t = dark_default();
@@ -151,7 +188,7 @@ static theme light()
 
 std::vector<theme> presets()
 {
-	return {oled(), dark_default(), midnight(), graphite(), slate_light(), light()};
+	return {hyprland(), oled(), dark_default(), midnight(), graphite(), slate_light(), light()};
 }
 
 std::vector<accent_swatch> accent_swatches()
@@ -163,6 +200,7 @@ std::vector<accent_swatch> accent_swatches()
 	        {"Amber", rgb(255, 160, 0), rgb(255, 176, 36), rgb(228, 140, 0)},
 	        {"Rose", rgb(255, 40, 82), rgb(255, 74, 108), rgb(230, 28, 68)},
 	        {"Cyan", rgb(0, 190, 225), rgb(34, 205, 236), rgb(0, 168, 200)},
+	        {"Lime", rgb(164, 239, 119), rgb(190, 250, 148), rgb(126, 204, 82)},
 	};
 }
 
@@ -176,7 +214,7 @@ void set_accent(const accent_swatch & swatch)
 
 theme & current()
 {
-	static theme t = dark_default();
+	static theme t = hyprland();
 	return t;
 }
 
@@ -187,7 +225,7 @@ void set_theme(const theme & t)
 
 float & background_alpha()
 {
-	static float alpha = 0.75f; // translucent panels by default
+	static float alpha = 0.96f; // nearly solid so bright VR worlds cannot wash out text
 	return alpha;
 }
 
@@ -229,6 +267,10 @@ void theme::apply() const
 	c[ImGuiCol_ScrollbarGrabHovered] = control_hovered;
 	c[ImGuiCol_ScrollbarGrabActive] = control_active;
 	c[ImGuiCol_Separator] = border;
+	c[ImGuiCol_NavHighlight] = ImVec4{accent.x, accent.y, accent.z, 0.16f};
+	c[ImGuiCol_TitleBg] = card;
+	c[ImGuiCol_TitleBgActive] = card_hovered;
+	c[ImGuiCol_ModalWindowDimBg] = dimming;
 }
 
 } // namespace wivrn::ui

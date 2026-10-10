@@ -121,6 +121,9 @@ if (WIVRN_BUILD_SERVER)
 			driver/clock_offset.cpp
 			driver/configuration.cpp
 			driver/fbt_supervisor.cpp
+			driver/body_pose_asset.cpp
+			driver/body_pose_assist.cpp
+			driver/body_motion_classifier.cpp
 			driver/hand_joints_list.cpp
 			driver/pose_list.cpp
 			driver/tracking_control.cpp
@@ -145,7 +148,8 @@ if (WIVRN_BUILD_SERVER)
 		)
 	target_compile_features(wivrn-server PRIVATE cxx_std_20)
 	target_compile_definitions(wivrn-server PRIVATE
-		VULKAN_HPP_NO_CONSTRUCTORS)
+		VULKAN_HPP_NO_CONSTRUCTORS
+		WIVRN_BODY_POSE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/poses")
 
 	target_include_directories(wivrn-server SYSTEM PRIVATE ${monado_SOURCE_DIR}/src/xrt/compositor/)
 	target_include_directories(wivrn-server PRIVATE .)
@@ -320,6 +324,25 @@ if (WIVRN_BUILD_SERVER)
 		target_include_directories(fbt-supervisor-test PRIVATE .)
 		target_link_libraries(fbt-supervisor-test PRIVATE aux_util)
 		add_test(NAME fbt-supervisor COMMAND fbt-supervisor-test)
+
+		add_executable(body-pose-assist-test
+			driver/body_pose_asset.cpp
+			driver/body_pose_assist.cpp
+			driver/body_pose_assist_test.cpp)
+		target_compile_features(body-pose-assist-test PRIVATE cxx_std_20)
+		target_compile_definitions(body-pose-assist-test PRIVATE
+			WIVRN_BODY_POSE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/poses")
+		target_include_directories(body-pose-assist-test PRIVATE .)
+		target_link_libraries(body-pose-assist-test PRIVATE aux_util wivrn-common nlohmann_json::nlohmann_json)
+		add_test(NAME body-pose-assist COMMAND body-pose-assist-test)
+
+		add_executable(body-motion-classifier-test
+			driver/body_motion_classifier.cpp
+			driver/body_motion_classifier_test.cpp)
+		target_compile_features(body-motion-classifier-test PRIVATE cxx_std_20)
+		target_include_directories(body-motion-classifier-test PRIVATE .)
+		target_link_libraries(body-motion-classifier-test PRIVATE aux_util wivrn-common)
+		add_test(NAME body-motion-classifier COMMAND body-motion-classifier-test)
 	endif()
 
 	configure_file(dist/wivrn.service.in wivrn.service)
@@ -331,6 +354,9 @@ if (WIVRN_BUILD_SERVER)
 		DESTINATION lib/firewalld/services)
 
 	install(TARGETS wivrn-server)
+	install(DIRECTORY poses/
+		DESTINATION ${CMAKE_INSTALL_DATADIR}/wivrn/poses
+		FILES_MATCHING PATTERN "*.wivrnpose.json")
 endif()
 
 if (WIVRN_BUILD_SERVER_LIBRARY)

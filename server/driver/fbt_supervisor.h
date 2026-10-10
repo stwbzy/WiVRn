@@ -168,6 +168,10 @@ public:
 
 	explicit fbt_supervisor(fbt_supervisor_config config = {});
 
+	// Update policy without discarding the accepted relation or lifecycle. This
+	// is used by adaptive movement profiles while the stream is running.
+	void reconfigure(fbt_supervisor_config config, bool preserve_state = true);
+
 	// The canonical integration entry point.
 	fbt_supervisor_result update(int64_t timestamp_ns, const xrt_space_relation & relation, float confidence = 1.0f);
 

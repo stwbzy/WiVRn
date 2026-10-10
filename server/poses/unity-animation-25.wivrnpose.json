@@ -1,0 +1,35 @@
+{
+    "format": "wivrn-pose",
+    "version": 1,
+    "units": "height_ratio",
+    "uuid": "unity.9b8a991000738a04d984a41268587e5a",
+    "name": "Animation_25",
+    "category": "back",
+    "reference_height_m": 1.1859502792358399,
+    "allow_mirror": false,
+    "root": {
+        "mode": "hybrid",
+        "head": [0.0, 0.06719499081373215, 0.0],
+        "hip": [-5.244385481439906e-10, 0.0, 0.24877654016017915],
+        "chest": [0.016704663634300233, 0.004139178432524204, 0.17515435814857484],
+        "chest_forward": [-0.06463078409433365, 0.9633859395980835, 0.26021233201026919],
+        "hip_forward": [0.016697172075510026, 0.9652697443962097, 0.2607210874557495],
+        "head_surface_blend": 0.6499999761581421
+    },
+    "legs": {
+        "left": {
+            "ankle": [-0.22398832440376283, 0.007172734476625919, 0.48919573426246645],
+            "foot_direction": [-0.23597027361392976, 0.17414405941963197, 0.9560292363166809],
+            "bend_pole": [-0.047482091933488849, 0.22173857688903809, 0.4270603656768799],
+            "contact": {"enabled": false, "compliance_mm": 8.0, "release_distance_mm": 180.0}
+        },
+        "right": {
+            "ankle": [-0.044090673327445987, 0.006571863312274218, 0.7596858739852905],
+            "foot_direction": [-0.46478554606437685, 0.39185529947280886, 0.793992280960083],
+            "bend_pole": [-0.05240512639284134, 0.1552281379699707, 0.5175047516822815],
+            "contact": {"enabled": false, "compliance_mm": 8.0, "release_distance_mm": 180.0}
+        }
+    },
+    "tracker_policy": {"chest": "enabled", "hip": "enabled", "knees": "optional", "feet": "enabled"},
+    "transition": {"enter_ms": 650, "exit_ms": 450, "curve": "smoothstep"}
+}

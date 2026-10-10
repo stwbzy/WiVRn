@@ -140,8 +140,7 @@ float adaptive_alpha(const fbt_supervisor_config & config,
 		if (config.max_linear_speed_m_s > epsilon)
 			motion = std::max(motion, length(subtract(current.pose.position, previous.pose.position)) / dt / config.max_linear_speed_m_s);
 		if (config.max_angular_speed_rad_s > epsilon)
-			motion = std::max(motion, quaternion_angle(previous.pose.orientation, current.pose.orientation) / dt /
-			                                      config.max_angular_speed_rad_s);
+			motion = std::max(motion, quaternion_angle(previous.pose.orientation, current.pose.orientation) / dt / config.max_angular_speed_rad_s);
 	}
 
 	motion = std::clamp(motion, 0.0f, 1.0f);
@@ -165,6 +164,12 @@ void blend_relation(const xrt_space_relation & previous, xrt_space_relation & cu
 
 fbt_supervisor::fbt_supervisor(fbt_supervisor_config config) : config_(config)
 {
+	reconfigure(config, false);
+}
+
+void fbt_supervisor::reconfigure(fbt_supervisor_config config, bool preserve_state)
+{
+	config_ = config;
 	config_.minimum_confidence = std::clamp(config_.minimum_confidence, 0.0f, 1.0f);
 	config_.hold_duration_ns = std::max<int64_t>(0, config_.hold_duration_ns);
 	config_.hard_loss_duration_ns = std::max<int64_t>(0, config_.hard_loss_duration_ns);
@@ -176,6 +181,8 @@ fbt_supervisor::fbt_supervisor(fbt_supervisor_config config) : config_(config)
 	config_.smoothing_max_alpha = std::clamp(config_.smoothing_max_alpha, config_.smoothing_min_alpha, 1.0f);
 	config_.smoothing_alpha = std::clamp(config_.smoothing_alpha, config_.smoothing_min_alpha, config_.smoothing_max_alpha);
 	config_.smoothing_motion_gain = std::clamp(config_.smoothing_motion_gain, 0.0f, 1.0f);
+	if (!preserve_state)
+		clear_lifecycle();
 }
 
 fbt_supervisor::validation fbt_supervisor::validate(const xrt_space_relation & relation, float confidence) const
@@ -295,9 +302,9 @@ void fbt_supervisor::smooth_into(const xrt_space_relation & relation, float conf
 }
 
 fbt_supervisor_result fbt_supervisor::make_result(fbt_supervisor_reason reason,
-                                                   bool input_valid,
-                                                   bool accepted,
-                                                   float confidence) const
+                                                  bool input_valid,
+                                                  bool accepted,
+                                                  float confidence) const
 {
 	fbt_supervisor_result result{};
 	result.state = state_;
@@ -312,7 +319,7 @@ fbt_supervisor_result fbt_supervisor::make_result(fbt_supervisor_reason reason,
 		result.age_ns = elapsed(evaluation_timestamp_ns_, dropout_started_ns_);
 
 	const bool held = state_ == fbt_supervisor_state::holding && have_valid_pose_ &&
-                  result.age_ns <= config_.hold_duration_ns;
+	                  result.age_ns <= config_.hold_duration_ns;
 	const bool tracking = state_ == fbt_supervisor_state::tracking && have_valid_pose_;
 	if (held || tracking)
 	{

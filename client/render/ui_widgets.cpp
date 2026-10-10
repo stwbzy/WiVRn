@@ -45,6 +45,29 @@ namespace
 std::function<void()> hover_haptic_hook;
 std::function<void(const char *)> tooltip_hook;
 
+// Small frame-rate independent transitions shared by the touch widgets. Values are
+// keyed by ImGui IDs, so switching pages naturally starts a fresh reveal.
+std::unordered_map<ImGuiID, float> animation_values;
+
+float animate_scalar(ImGuiID id, float target, float speed = 14.f)
+{
+	float & value = animation_values[id];
+	const float dt = ImClamp(ImGui::GetIO().DeltaTime, 0.001f, 0.05f);
+	value += (target - value) * (1.f - std::exp(-speed * dt));
+	if (std::abs(target - value) < 0.001f)
+		value = target;
+	return value;
+}
+
+ImVec4 mix(const ImVec4 & a, const ImVec4 & b, float amount)
+{
+	amount = ImClamp(amount, 0.f, 1.f);
+	return {a.x + (b.x - a.x) * amount,
+	        a.y + (b.y - a.y) * amount,
+	        a.z + (b.z - a.z) * amount,
+	        a.w + (b.w - a.w) * amount};
+}
+
 // height reserved for the pinned sidebar footer, set by begin_sidebar
 float sidebar_footer_height = 0;
 } // namespace
@@ -76,6 +99,9 @@ static void show_tooltip(const std::string & text)
 void page_header(const std::string & title, const std::string & subtitle)
 {
 	const theme & t = current();
+	const ImGuiID header_id = ImGui::GetID(("##page_header_" + title).c_str());
+	const float reveal = animate_scalar(header_id, 1.f, 9.f);
+	ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.18f + 0.82f * reveal);
 
 	ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * metrics::font_title);
 	ImGui::TextUnformatted(title.c_str());
@@ -87,6 +113,14 @@ void page_header(const std::string & title, const std::string & subtitle)
 		ImGui::TextUnformatted(subtitle.c_str());
 		ImGui::PopStyleColor();
 	}
+	ImGui::PopStyleVar();
+
+	// A short animated neon rule gives each page a stable visual anchor without
+	// changing its layout or adding another control.
+	const ImVec2 line = ImGui::GetCursorScreenPos();
+	ImVec4 line_color = t.accent;
+	line_color.w = 0.56f + 0.14f * std::sin(float(ImGui::GetTime()) * 2.2f);
+	ImGui::GetWindowDrawList()->AddRectFilled(line, line + ImVec2{64.f + 18.f * reveal, 3.f}, t.col(line_color), 1.5f);
 	ImGui::Dummy({0, ImGui::GetStyle().ItemSpacing.y});
 }
 
@@ -123,11 +157,16 @@ bool begin_card_impl(const char * id, ImVec2 padding)
 	if (const float h = card_heights[gid]; h > 0)
 	{
 		const ImVec2 bb_max = {cf.origin.x + cf.width, cf.origin.y + h};
+		const float reveal = animate_scalar(gid, 1.f, 8.f);
+		ImVec4 shadow = {0, 0, 0, 0.28f * reveal};
+		window->DrawList->AddRectFilled(cf.origin + ImVec2{0, 5}, bb_max + ImVec2{0, 5}, t.col(shadow), t.card_rounding + 2);
 		ImVec4 card = t.card;
-		card.w *= background_alpha(); // card fill follows the panel opacity
+		card.w *= background_alpha() * (0.88f + 0.12f * reveal); // card fill follows the panel opacity
 		window->DrawList->AddRectFilled(cf.origin, bb_max, t.col(card), t.card_rounding);
 		if (t.border_size > 0)
 			window->DrawList->AddRect(cf.origin, bb_max, t.col(t.border), t.card_rounding, 0, t.border_size);
+		// restrained accent edge, kept narrow so cards remain visually calm
+		window->DrawList->AddRectFilled(cf.origin + ImVec2{18, 0}, cf.origin + ImVec2{72, 2}, t.col(t.accent), 1.f);
 	}
 
 	ImGui::PushID(id);
@@ -248,7 +287,8 @@ std::string icon_label(const char * icon, const std::string & label)
 
 float button_width(const std::string & label)
 {
-	return ImGui::CalcTextSize(label.c_str()).x + metrics::button_padding.x * 2;
+	const char * end = ImGui::FindRenderedTextEnd(label.c_str());
+	return ImGui::CalcTextSize(label.c_str(), end).x + metrics::button_padding.x * 2;
 }
 
 float button_width(const char * icon, const std::string & label)
@@ -257,7 +297,8 @@ float button_width(const char * icon, const std::string & label)
 	const float icon_w = ImGui::CalcTextSize(icon).x;
 	ImGui::PopFont();
 	const float gap = ImGui::GetFontSize() * 0.4f;
-	return icon_w + gap + ImGui::CalcTextSize(label.c_str()).x + metrics::button_padding.x * 2;
+	const char * end = ImGui::FindRenderedTextEnd(label.c_str());
+	return icon_w + gap + ImGui::CalcTextSize(label.c_str(), end).x + metrics::button_padding.x * 2;
 }
 
 ImVec2 chip_size(const std::string & label)
@@ -278,23 +319,38 @@ float chip_width(const std::string & label, bool dot, float height)
 
 bool button(const std::string & label, button_style s, const ImVec2 & size)
 {
+	ImGuiWindow * window = ImGui::GetCurrentWindow();
+	if (window->SkipItems)
+		return false;
+
 	const theme & t = current();
+	const ImGuiStyle & style = ImGui::GetStyle();
 
 	// control height by default, width auto-fits the label
 	const float h = size.y > 0 ? size.y : ImGui::GetFrameHeight() * metrics::control_height;
+	const float w = size.x > 0 ? size.x : button_width(label);
+	const ImVec2 pos = window->DC.CursorPos;
+	const ImRect bb(pos, pos + ImVec2{w, h});
+	ImGui::ItemSize(bb, style.FramePadding.y);
+	const ImGuiID gid = window->GetID(label.c_str());
+	if (not ImGui::ItemAdd(bb, gid))
+		return false;
 
 	const button_colors c = colors_for(s, t);
-	ImGui::PushStyleColor(ImGuiCol_Button, c.bg);
-	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, c.bg_hovered);
-	ImGui::PushStyleColor(ImGuiCol_ButtonActive, c.bg_active);
-	ImGui::PushStyleColor(ImGuiCol_Text, c.text);
-
-	ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, t.rounding);
-	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, metrics::button_padding);
-	const bool pressed = ImGui::Button(label.c_str(), {size.x, h});
-	ImGui::PopStyleVar(2);
-	ImGui::PopStyleColor(4);
+	bool hovered, held;
+	const bool pressed = ImGui::ButtonBehavior(bb, gid, &hovered, &held);
 	hover_haptic();
+	const float hover_t = animate_scalar(gid, hovered ? 1.f : 0.f);
+	const float held_t = held ? 1.f : 0.f;
+	ImVec4 bg = mix(c.bg, c.bg_hovered, hover_t);
+	bg = mix(bg, c.bg_active, held_t);
+	ImDrawList * draw = window->DrawList;
+	draw->AddRectFilled(bb.Min, bb.Max, t.col(bg), t.rounding);
+	if (t.border_size > 0 and s != button_style::primary)
+		draw->AddRect(bb.Min, bb.Max, t.col(t.border), t.rounding, 0, t.border_size);
+	const char * label_end = ImGui::FindRenderedTextEnd(label.c_str());
+	const ImVec2 ts = ImGui::CalcTextSize(label.c_str(), label_end);
+	draw->AddText({bb.Min.x + (w - ts.x) * 0.5f, bb.Min.y + (h - ts.y) * 0.5f}, t.col(c.text), label.c_str(), label_end);
 	return pressed;
 }
 
@@ -315,7 +371,8 @@ bool button(const char * icon, const std::string & label, button_style s, const 
 	ImGui::PushFont(nullptr, glyph_size);
 	const float icon_w = ImGui::CalcTextSize(icon).x;
 	ImGui::PopFont();
-	const ImVec2 label_size = ImGui::CalcTextSize(label.c_str());
+	const char * label_end = ImGui::FindRenderedTextEnd(label.c_str());
+	const ImVec2 label_size = ImGui::CalcTextSize(label.c_str(), label_end);
 	const float content_w = icon_w + gap + label_size.x;
 	const float w = size.x > 0 ? size.x : content_w + metrics::button_padding.x * 2;
 
@@ -331,14 +388,15 @@ bool button(const char * icon, const std::string & label, button_style s, const 
 	hover_haptic();
 
 	const button_colors c = colors_for(s, t);
-	ImVec4 bg = c.bg;
-	if (held)
-		bg = c.bg_active;
-	else if (hovered)
-		bg = c.bg_hovered;
+	const float hover_t = animate_scalar(id, hovered ? 1.f : 0.f);
+	const float held_t = held ? 1.f : 0.f;
+	ImVec4 bg = mix(c.bg, c.bg_hovered, hover_t);
+	bg = mix(bg, c.bg_active, held_t);
 
 	ImDrawList * draw = window->DrawList;
 	draw->AddRectFilled(bb.Min, bb.Max, t.col(bg), t.rounding);
+	if (t.border_size > 0 and s != button_style::primary)
+		draw->AddRect(bb.Min, bb.Max, t.col(t.border), t.rounding, 0, t.border_size);
 
 	const ImU32 col = t.col(c.text);
 	const ImVec2 center = bb.GetCenter();
@@ -356,7 +414,7 @@ bool button(const char * icon, const std::string & label, button_style s, const 
 	ImGui::PopFont();
 
 	x += icon_w + gap;
-	draw->AddText({x, center.y - label_size.y * 0.5f}, col, label.c_str());
+	draw->AddText({x, center.y - label_size.y * 0.5f}, col, label.c_str(), label_end);
 
 	return pressed;
 }
@@ -388,11 +446,11 @@ bool icon_button(const char * icon, const ImVec2 & size_arg, bool active, const 
 	if (hovered)
 		show_tooltip(tooltip);
 
+	const float hover_t = animate_scalar(gid, hovered ? 1.f : 0.f);
+	const float held_t = held ? 1.f : 0.f;
 	ImVec4 bg = active ? t.accent : t.control;
-	if (held)
-		bg = active ? t.accent_active : t.control_active;
-	else if (hovered)
-		bg = active ? t.accent_hovered : t.control_hovered;
+	bg = mix(bg, active ? t.accent_hovered : t.control_hovered, hover_t);
+	bg = mix(bg, active ? t.accent_active : t.control_active, held_t);
 
 	ImDrawList * draw = window->DrawList;
 	draw->AddRectFilled(bb.Min, bb.Max, t.col(bg), t.rounding);
@@ -531,13 +589,14 @@ bool toggle(const char * id, bool * v, const bool * default_value)
 	if (changed)
 		*v = not *v;
 
-	ImVec4 track = *v ? t.accent : t.control;
-	if (hovered)
-		track = *v ? t.accent_hovered : t.control_hovered;
+	const float hover_t = animate_scalar(gid, hovered ? 1.f : 0.f);
+	const float state_t = animate_scalar(gid ^ 0x6f3a2b1u, *v ? 1.f : 0.f, 18.f);
+	ImVec4 track = mix(t.control, t.accent, state_t);
+	track = mix(track, *v ? t.accent_hovered : t.control_hovered, hover_t * 0.45f);
 
 	ImDrawList * draw = window->DrawList;
 	draw->AddRectFilled(bb.Min, bb.Max, t.col(track), radius);
-	const float cx = *v ? (bb.Max.x - radius) : (bb.Min.x + radius);
+	const float cx = bb.Min.x + radius + (bb.Max.x - bb.Min.x - 2 * radius) * state_t;
 	draw->AddCircleFilled({cx, bb.Min.y + radius}, radius - metrics::toggle_knob_inset, t.col(t.on_accent));
 
 	if (default_value and reset_slot(id, *v != *default_value))
@@ -657,6 +716,9 @@ bool segmented(const char * id, const std::vector<std::string> & options, int * 
 	const float seg_w = size.x / n;
 	const float pad = metrics::segmented_inset;
 	bool changed = false;
+	const float active_pos = animate_scalar(gid, float(*selected), 18.f);
+	const ImRect active_seg({bb.Min.x + seg_w * active_pos, bb.Min.y}, {bb.Min.x + seg_w * (active_pos + 1.f), bb.Max.y});
+	draw->AddRectFilled(active_seg.Min + ImVec2(pad, pad), active_seg.Max - ImVec2(pad, pad), t.col(t.accent), t.rounding);
 
 	for (int i = 0; i < n; ++i)
 	{
@@ -669,9 +731,7 @@ bool segmented(const char * id, const std::vector<std::string> & options, int * 
 		}
 
 		const bool active = *selected == i;
-		if (active)
-			draw->AddRectFilled(seg.Min + ImVec2(pad, pad), seg.Max - ImVec2(pad, pad), t.col(t.accent), t.rounding);
-		else if (seg_hovered)
+		if (not active and seg_hovered)
 			draw->AddRectFilled(seg.Min + ImVec2(pad, pad), seg.Max - ImVec2(pad, pad), t.col(t.control_hovered), t.rounding);
 
 		const char * label = options[i].c_str();
@@ -978,6 +1038,150 @@ void chip(const std::string & label, chip_style style, bool dot, float height)
 	draw->AddText({tx, bb.Min.y + (size.y - ts.y) * 0.5f}, t.col(fg), label.c_str());
 }
 
+void section_header(const std::string & title, const std::string & subtitle)
+{
+	const theme & t = current();
+	const ImGuiStyle & style = ImGui::GetStyle();
+	ImGui::PushFont(nullptr, style.FontSizeBase * metrics::font_modal_title);
+	ImGui::TextUnformatted(title.c_str());
+	ImGui::PopFont();
+	if (not subtitle.empty())
+	{
+		ImGui::PushFont(nullptr, style.FontSizeBase * metrics::font_description);
+		ImGui::PushStyleColor(ImGuiCol_Text, t.text_muted);
+		ImGui::TextUnformatted(subtitle.c_str());
+		ImGui::PopStyleColor();
+		ImGui::PopFont();
+	}
+	ImGui::Dummy({0, metrics::section_gap * 0.25f});
+}
+
+bool disclosure(const char * id,
+                const char * icon,
+                const std::string & title,
+                const std::string & subtitle,
+                bool * open,
+                const std::string & status,
+                chip_style status_style)
+{
+	ImGuiWindow * window = ImGui::GetCurrentWindow();
+	if (window->SkipItems)
+		return false;
+
+	const theme & t = current();
+	const ImGuiStyle & style = ImGui::GetStyle();
+	const float h = ImGui::GetFrameHeight() * metrics::disclosure_height;
+	const ImVec2 pos = window->DC.CursorPos;
+	const ImRect bb(pos, pos + ImVec2{ImGui::GetContentRegionAvail().x, h});
+	ImGui::ItemSize(bb, style.FramePadding.y);
+	const ImGuiID gid = window->GetID(id);
+	if (not ImGui::ItemAdd(bb, gid))
+		return false;
+
+	bool hovered, held;
+	const bool pressed = ImGui::ButtonBehavior(bb, gid, &hovered, &held);
+	hover_haptic();
+	if (pressed)
+		*open = not *open;
+
+	const float hover_t = animate_scalar(gid, hovered ? 1.f : 0.f);
+	const float open_t = animate_scalar(gid ^ 0x18d932u, *open ? 1.f : 0.f, 16.f);
+	ImVec4 bg = mix(t.card, t.card_hovered, hover_t);
+	bg = mix(bg, t.control, 0.30f * open_t);
+	ImDrawList * draw = window->DrawList;
+	draw->AddRectFilled(bb.Min, bb.Max, t.col(bg), t.card_rounding);
+	draw->AddRect(bb.Min, bb.Max, t.col(*open ? t.accent : t.border), t.card_rounding, 0, t.border_size);
+	if (open_t > 0.001f)
+		draw->AddRectFilled(bb.Min,
+		                    {bb.Min.x + 4.f, bb.Max.y},
+		                    t.col(t.accent),
+		                    t.card_rounding,
+		                    ImDrawFlags_RoundCornersLeft);
+
+	const float pad = metrics::card_padding.x;
+	const float icon_box = h - 2.f * metrics::list_row_pad;
+	const ImVec2 icon_min{bb.Min.x + pad, bb.Min.y + metrics::list_row_pad};
+	const ImVec2 icon_max = icon_min + ImVec2{icon_box, icon_box};
+	draw->AddRectFilled(icon_min, icon_max, t.col(*open ? t.accent : t.control), t.rounding);
+	if (icon and icon[0])
+	{
+		const ImVec2 icon_size = ImGui::CalcTextSize(icon);
+		draw->AddText(icon_min + (ImVec2{icon_box, icon_box} - icon_size) * 0.5f,
+		              t.col(*open ? t.on_accent : t.text_muted),
+		              icon);
+	}
+
+	const float tx = icon_max.x + metrics::list_row_pad;
+	const ImVec2 title_size = ImGui::CalcTextSize(title.c_str());
+	const float desc_font_size = style.FontSizeBase * metrics::font_description;
+	ImGui::PushFont(nullptr, desc_font_size);
+	const ImVec2 subtitle_size = ImGui::CalcTextSize(subtitle.c_str());
+	const float text_height = title_size.y + (subtitle.empty() ? 0.f : metrics::label_line_gap + subtitle_size.y);
+	const float text_y = bb.Min.y + (h - text_height) * 0.5f;
+	if (not subtitle.empty())
+		draw->AddText({tx, text_y + title_size.y + metrics::label_line_gap},
+		              t.col(t.text_muted),
+		              subtitle.c_str());
+	ImGui::PopFont();
+	draw->AddText({tx, text_y}, t.col(t.text), title.c_str());
+
+	const float arrow_space = 42.f;
+	if (not status.empty())
+	{
+		ImVec4 status_fg = t.text;
+		ImVec4 status_bg = t.control;
+		switch (status_style)
+		{
+			case chip_style::accent:
+				status_fg = t.accent;
+				status_bg = {t.accent.x, t.accent.y, t.accent.z, 0.16f};
+				break;
+			case chip_style::success:
+				status_fg = t.success;
+				status_bg = {t.success.x, t.success.y, t.success.z, 0.16f};
+				break;
+			case chip_style::warning:
+				status_fg = t.warning;
+				status_bg = {t.warning.x, t.warning.y, t.warning.z, 0.16f};
+				break;
+			case chip_style::danger:
+				status_fg = t.danger;
+				status_bg = {t.danger.x, t.danger.y, t.danger.z, 0.16f};
+				break;
+			case chip_style::muted:
+				status_fg = t.text_muted;
+				break;
+			case chip_style::neutral:
+				break;
+		}
+		const ImVec2 status_text = ImGui::CalcTextSize(status.c_str());
+		const ImVec2 status_size{status_text.x + metrics::chip_padding.x * 2.f,
+		                         status_text.y + metrics::chip_padding.y * 2.f};
+		const ImVec2 status_min{bb.Max.x - pad - arrow_space - status_size.x,
+		                        bb.Min.y + (h - status_size.y) * 0.5f};
+		draw->AddRectFilled(status_min, status_min + status_size, t.col(status_bg), status_size.y * 0.5f);
+		draw->AddText(status_min + (status_size - status_text) * 0.5f,
+		              t.col(status_fg),
+		              status.c_str());
+	}
+
+	const ImVec2 center{bb.Max.x - pad - arrow_space * 0.5f, bb.GetCenter().y};
+	const float r = 7.f;
+	const ImVec2 closed_a{center.x - r * 0.45f, center.y - r};
+	const ImVec2 closed_b{center.x - r * 0.45f, center.y + r};
+	const ImVec2 closed_c{center.x + r * 0.65f, center.y};
+	const ImVec2 open_a{center.x - r, center.y - r * 0.45f};
+	const ImVec2 open_b{center.x + r, center.y - r * 0.45f};
+	const ImVec2 open_c{center.x, center.y + r * 0.65f};
+	auto tween = [open_t](const ImVec2 & a, const ImVec2 & b) { return a + (b - a) * open_t; };
+	draw->AddTriangleFilled(tween(closed_a, open_a),
+	                        tween(closed_b, open_b),
+	                        tween(closed_c, open_c),
+	                        t.col(t.text_muted));
+
+	return pressed;
+}
+
 void nav_section(const std::string & label)
 {
 	const theme & t = current();
@@ -990,6 +1194,8 @@ void nav_section(const std::string & label)
 	ImGui::TextUnformatted(label.c_str());
 	ImGui::PopStyleColor();
 	ImGui::PopFont();
+	const ImVec2 marker = ImGui::GetItemRectMin();
+	ImGui::GetWindowDrawList()->AddRectFilled(marker - ImVec2{metrics::combo_padding.x, -2}, marker - ImVec2{metrics::combo_padding.x - 3, -style.FontSizeBase * metrics::font_description}, t.col(t.accent), 1.5f);
 	ImGui::Unindent(metrics::combo_padding.x);
 	ImGui::Dummy({0, 4});
 }
@@ -1018,12 +1224,18 @@ bool nav_item(const char * icon, const std::string & label, bool selected)
 
 	ImDrawList * draw = window->DrawList;
 	const float lum = t.background.x * 0.299f + t.background.y * 0.587f + t.background.z * 0.114f;
-	if (selected)
+	const float hover_t = animate_scalar(gid, hovered ? 1.f : 0.f);
+	const float selected_t = animate_scalar(gid ^ 0x42a7d1u, selected ? 1.f : 0.f, 12.f);
+	if (selected_t > 0.001f)
 	{
-		// accent fill for the active tab
-		draw->AddRectFilled(bb.Min, bb.Max, t.col(t.accent), t.rounding);
+		// Active rows use a translucent surface and a bright edge, avoiding a
+		// wall of saturated colour while keeping focus obvious.
+		ImVec4 active_bg = mix(t.control, t.accent, 0.16f * selected_t);
+		draw->AddRectFilled(bb.Min, bb.Max, t.col(active_bg), t.rounding);
+		const float edge_w = 3.f + 3.f * selected_t;
+		draw->AddRectFilled(bb.Min, {bb.Min.x + edge_w, bb.Max.y}, t.col(t.accent), t.rounding, ImDrawFlags_RoundCornersLeft);
 	}
-	else if (hovered)
+	if (hover_t > 0.001f and not selected)
 	{
 		// lighten on dark themes, darken on light ones, the framebuffer blends in linear
 		// light, so solve for the alpha that yields a constant perceived (gamma-space) step
@@ -1033,17 +1245,17 @@ bool nav_item(const char * icon, const std::string & label, bool selected)
 		const float ys = to_linear(lum);
 		const float yt = to_linear(std::clamp(lum + (overlay - lum) / std::abs(overlay - lum) * step, 0.f, 1.f));
 		const float a = (yt - ys) / (overlay - ys);
-		draw->AddRectFilled(bb.Min, bb.Max, t.col({overlay, overlay, overlay, a}), t.rounding);
+		draw->AddRectFilled(bb.Min, bb.Max, t.col({overlay, overlay, overlay, a * hover_t}), t.rounding);
 	}
 
 	const float pad = metrics::combo_padding.x;
 	const float icon_w = ImGui::GetFontSize() * 1.5f; // icon column
 
 	const ImVec2 its = ImGui::CalcTextSize(icon);
-	draw->AddText({bb.Min.x + pad + (icon_w - its.x) * 0.5f, bb.Min.y + (h - its.y) * 0.5f}, t.col(selected ? t.on_accent : t.text_muted), icon);
+	draw->AddText({bb.Min.x + pad + (icon_w - its.x) * 0.5f, bb.Min.y + (h - its.y) * 0.5f}, t.col(selected ? t.accent : t.text_muted), icon);
 
 	const ImVec2 ls = ImGui::CalcTextSize(label.c_str());
-	draw->AddText({bb.Min.x + pad + icon_w + pad * 0.5f, bb.Min.y + (h - ls.y) * 0.5f}, t.col(selected ? t.on_accent : t.text), label.c_str());
+	draw->AddText({bb.Min.x + pad + icon_w + pad * 0.5f, bb.Min.y + (h - ls.y) * 0.5f}, t.col(selected ? t.text : t.text), label.c_str());
 
 	return pressed;
 }
@@ -1378,6 +1590,18 @@ void top_bar(float height, ImTextureID logo, const std::vector<top_bar_item> & r
 	ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4{0, 0, 0, 0});
 	ImGui::BeginChild("TopBar", {ImGui::GetWindowSize().x, height}, 0, ImGuiWindowFlags_NoScrollbar);
 	{
+		// A low-contrast top wash separates navigation from content while the
+		// cyan rule gives the shell a crisp Hyprland-like edge.
+		const theme & t = current();
+		ImDrawList * draw = ImGui::GetWindowDrawList();
+		const ImVec2 top = ImGui::GetWindowPos();
+		const ImVec2 right = top + ImVec2{ImGui::GetWindowSize().x, height};
+		ImVec4 wash = t.card;
+		wash.w = background_alpha() * 0.72f;
+		draw->AddRectFilledMultiColor(top, right, t.col(wash), t.col(wash), t.col({wash.x, wash.y, wash.z, wash.w * 0.35f}), t.col({wash.x, wash.y, wash.z, wash.w * 0.35f}));
+		draw->AddRectFilled({top.x + margin, right.y - 2}, {top.x + margin + 76, right.y}, t.col(t.accent), 1.f);
+		draw->AddLine({top.x, right.y - 1}, {right.x, right.y - 1}, t.col(t.border));
+
 		// logo: WiVRn mascot followed by the wordmark
 		const float logo_size = 44;
 		ImGui::SetCursorPos({margin, (height - logo_size) * 0.5f});
@@ -1450,6 +1674,9 @@ void shell_dividers(float top_bar_h, float tab_width)
 	ImDrawList * dl = ImGui::GetWindowDrawList();
 	dl->AddLine({win_pos.x, win_pos.y + top_bar_h}, {win_pos.x + win_size.x, win_pos.y + top_bar_h}, divider);
 	dl->AddLine({win_pos.x + tab_width, win_pos.y + top_bar_h}, {win_pos.x + tab_width, win_pos.y + win_size.y}, divider);
+	ImVec4 glow = current().accent;
+	glow.w = 0.20f * background_alpha();
+	dl->AddLine({win_pos.x + tab_width + 1, win_pos.y + top_bar_h + 8}, {win_pos.x + tab_width + 1, win_pos.y + win_size.y - 8}, current().col(glow));
 }
 
 } // namespace wivrn::ui
