@@ -10,6 +10,10 @@
 
 ## About this enhanced fork
 
+Download the matched Quest APK and Linux streamer from the
+[v0.3.1 release](https://github.com/stwbzy/WiVRn/releases/tag/v0.3.1-fsr-runtime).
+See [installation and startup commands](docs/release-v0.3.1.md).
+
 This branch is an experimental WiVRn fork focused on a smoother and more
 resilient PCVR experience while remaining compatible with multiple headsets
 and OpenXR applications.
