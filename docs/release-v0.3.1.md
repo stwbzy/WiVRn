@@ -24,8 +24,10 @@ chmod +x WiVRn-fsr-runtime-v0.3.1-linux-x86_64.AppImage
 ./WiVRn-fsr-runtime-v0.3.1-linux-x86_64.AppImage --early-active-runtime --no-fork
 ```
 
-For initial pairing, append `--pair`. If FUSE is unavailable, prefix the command
-with `APPIMAGE_EXTRACT_AND_RUN=1`.
+Pairing opens automatically on a PC with no saved headset. Otherwise run
+`wivrnctl pair` from the tar.gz package in another terminal while the server
+is running. If FUSE is unavailable, prefix the AppImage command with
+`APPIMAGE_EXTRACT_AND_RUN=1`.
 
 The tar.gz contains an installed server tree. After extraction, expose its
 libraries and data before startup:
