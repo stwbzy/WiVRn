@@ -67,11 +67,6 @@ fi
 cp "$SOURCE_DIR/LICENSE-SGSR1-BSD-3-Clause" \
 	"$STAGE_DIR/LICENSE-SGSR1-BSD-3-Clause"
 
-tar --create --gzip --file "$OUTPUT_DIR/${BASE_NAME}.tar.gz" \
-	--owner=0 --group=0 --numeric-owner --sort=name \
-	--mtime="@${SOURCE_DATE_EPOCH}" \
-	--directory "$STAGE_DIR" .
-
 cp -a "$STAGE_DIR" "$APPDIR"
 
 LINUXDEPLOY="$TOOLS_DIR/linuxdeploy-x86_64.AppImage"
@@ -95,6 +90,12 @@ set -- "$@" \
 	--icon-filename io.github.wivrn.wivrn \
 	--custom-apprun "$SOURCE_DIR/packaging/portable-linux/AppRun"
 APPIMAGE_EXTRACT_AND_RUN=1 "$@"
+
+# Archive the dependency-complete tree, including its relocatable launcher.
+tar --create --gzip --file "$OUTPUT_DIR/${BASE_NAME}.tar.gz" \
+	--owner=0 --group=0 --numeric-owner --sort=name \
+	--mtime="@${SOURCE_DATE_EPOCH}" \
+	--directory "$APPDIR" .
 
 # appimagetool forwards its own timestamp options to mksquashfs.  Newer
 # squashfs-tools reject those options when SOURCE_DATE_EPOCH is also present,
