@@ -330,6 +330,7 @@ if (WIVRN_BUILD_SERVER)
 			driver/body_pose_assist.cpp
 			driver/body_pose_assist_test.cpp)
 		target_compile_features(body-pose-assist-test PRIVATE cxx_std_20)
+		target_compile_options(body-pose-assist-test PRIVATE -UNDEBUG)
 		target_compile_definitions(body-pose-assist-test PRIVATE
 			WIVRN_BODY_POSE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/poses")
 		target_include_directories(body-pose-assist-test PRIVATE .)
@@ -340,6 +341,7 @@ if (WIVRN_BUILD_SERVER)
 			driver/body_motion_classifier.cpp
 			driver/body_motion_classifier_test.cpp)
 		target_compile_features(body-motion-classifier-test PRIVATE cxx_std_20)
+		target_compile_options(body-motion-classifier-test PRIVATE -UNDEBUG)
 		target_include_directories(body-motion-classifier-test PRIVATE .)
 		target_link_libraries(body-motion-classifier-test PRIVATE aux_util wivrn-common)
 		add_test(NAME body-motion-classifier COMMAND body-motion-classifier-test)
