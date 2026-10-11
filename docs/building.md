@@ -6,7 +6,7 @@
 
 From your checkout directory, with automatic detection of encoders
 ```bash
-cmake -B build-server . -GNinja -DWIVRN_BUILD_CLIENT=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake -B build-server . -GNinja -DWIVRN_BUILD_CLIENT=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=/usr/local
 cmake --build build-server
 ```
 
@@ -34,6 +34,38 @@ Lighthouse driver support for use with lighthouse-tracked devices
 ```
 
 Additionally, if your environment requires absolute paths inside the OpenXR runtime manifest, you can add `-DWIVRN_OPENXR_MANIFEST_TYPE=absolute` to the build configuration.
+
+## Install
+
+Choose `CMAKE_INSTALL_PREFIX` at **configure time**, then build and install with
+the same prefix:
+
+```bash
+sudo cmake --install build-server
+/usr/local/bin/wivrn-server --no-fork --early-active-runtime
+```
+
+The server embeds this prefix to find `share/openxr/1/openxr_wivrn*.json`.
+To use `/usr` instead, configure with `-DCMAKE_INSTALL_PREFIX=/usr` and rebuild
+before installing. Changing only `cmake --install --prefix` does not update the
+compiled-in path. `DESTDIR` can still be used for package staging.
+
+If upgrading a server+dashboard build that previously searched `/usr/local`
+but installed under `/usr`, reconfigure, rebuild, and reinstall both components
+with one explicit prefix. Do not fix it by deleting other runtimes or disabling
+the OpenXR version check.
+
+With `-DWIVRN_BUILD_TEST=ON`, the installation regression checks are:
+
+```bash
+cmake --build build-server --target runtime-manifest-test
+ctest --test-dir build-server --output-on-failure \
+  -R 'install-prefix-consistency|runtime-manifest'
+```
+
+Missing or unreadable manifest directories now produce a diagnostic instead
+of stopping the server. This does not replace installing the manifest and its
+matching runtime library: OpenXR games still need both to connect.
 
 ## Profiling / tracing build
 
@@ -124,8 +156,9 @@ The WiVRn dashboard requires Qt6, and the WiVRn server.
 
 From your checkout directory, compile both the server and the dashboard:
 ```bash
-cmake -B build-dashboard . -GNinja -DWIVRN_BUILD_CLIENT=OFF -DWIVRN_BUILD_SERVER=ON -DWIVRN_BUILD_DASHBOARD=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake -B build-dashboard . -GNinja -DWIVRN_BUILD_CLIENT=OFF -DWIVRN_BUILD_SERVER=ON -DWIVRN_BUILD_DASHBOARD=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=/usr/local
 cmake --build build-dashboard
+sudo cmake --install build-dashboard
 ```
 
 See [Server](#server-pc) for the server compile options.

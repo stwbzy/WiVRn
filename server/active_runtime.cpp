@@ -21,6 +21,7 @@
 #include "driver/configuration.h"
 #include "utils/flatpak.h"
 #include "utils/overloaded.h"
+#include "utils/runtime_manifest.h"
 #include "utils/xdg_base_directory.h"
 #include "wivrn_config.h"
 #include <algorithm>
@@ -29,36 +30,28 @@
 #include <iostream>
 #include <nlohmann/json.hpp>
 
-static std::vector<std::filesystem::path> filter_files(const std::filesystem::path & directory, const std::string prefix)
-{
-	std::vector<std::filesystem::path> result;
-	for (const auto & file: std::filesystem::directory_iterator{directory})
-	{
-		if (file.path().filename().native().starts_with(prefix))
-			result.push_back(file.path());
-	}
-	return result;
-}
-
 namespace wivrn
 {
 
 std::vector<std::filesystem::path> active_runtime::manifest_path()
 {
 	const std::filesystem::path location = "share/openxr/1";
-	const std::filesystem::path prefix = "openxr_wivrn";
 	// Check if in a flatpak
 	if (auto path = flatpak_key(flatpak::section::instance, "app-path"))
 		return {*path / location / "openxr_wivrn.json"};
 
 	// Check if running from build directory
-	auto exe = std::filesystem::read_symlink("/proc/self/exe");
-	auto dev_manifest = exe.parent_path().parent_path() / "openxr_wivrn-dev.json";
-	if (std::filesystem::exists(dev_manifest))
-		return {dev_manifest};
+	std::error_code ec;
+	auto exe = std::filesystem::read_symlink("/proc/self/exe", ec);
+	if (!ec)
+	{
+		auto dev_manifest = exe.parent_path().parent_path() / "openxr_wivrn-dev.json";
+		if (std::filesystem::is_regular_file(dev_manifest, ec))
+			return {dev_manifest};
+	}
 
 	// Assume we are installed
-	return filter_files(WIVRN_INSTALL_PREFIX / location, prefix);
+	return find_runtime_manifests(WIVRN_INSTALL_PREFIX / location, std::cerr);
 }
 
 std::filesystem::path active_runtime::openvr_compat_path()

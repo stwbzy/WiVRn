@@ -1,4 +1,5 @@
-include(KDEInstallDirs)
+# Installation directories are resolved in the top-level CMakeLists.txt, before
+# generating the server's compiled-in installation prefix.
 include(KDECMakeSettings)
 include(ECMFeatureSummary)
 include(ECMFindQmlModule)
@@ -84,6 +85,7 @@ target_link_libraries(wivrn-dashboard
     QCoro::Core
     QCoro::Network
     QCoro::Qml
+    nlohmann_json::nlohmann_json
     wivrn-common-base
     wivrn-common-server
     wivrn-external

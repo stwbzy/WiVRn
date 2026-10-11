@@ -21,7 +21,6 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 include(FetchContent)
 include(ExternalProject)
-include(GNUInstallDirs)
 
 set(GIT_TAG "" CACHE STRING "Build for a tag (from git if empty)")
 set(GIT_DESC "" CACHE STRING "Version to show in UI (from git if empty, exclusive with GIT_TAG)")
@@ -49,6 +48,19 @@ option(WIVRN_BUILD_TEST "Build test binaries" OFF)
 option(WIVRN_WERROR "Treat warnings as errors" OFF)
 option(WIVRN_OPTIMIZE_SHADERS "Run spirv-opt on compiled shaders" ON)
 option(WIVRN_DEBUG_SHADERS "Compile shaders with debug information" OFF)
+
+# KDEInstallDirs can change the default installation prefix. Resolve it before
+# GNUInstallDirs (also loaded by Qt) and before common/wivrn_config.h is generated,
+# so the server searches the same prefix that cmake --install will use.
+if(WIVRN_BUILD_DASHBOARD)
+    find_package(ECM 5.115 REQUIRED NO_MODULE)
+    list(APPEND CMAKE_MODULE_PATH "${ECM_MODULE_PATH}")
+    # ECM's Qt query otherwise defaults to Qt 5 before find_package(Qt6).
+    set(QT_MAJOR_VERSION 6)
+    include(KDEInstallDirs6)
+endif()
+include(GNUInstallDirs)
+
 if(WIVRN_BUILD_TEST)
     enable_testing()
 endif()
@@ -174,9 +186,6 @@ if (WIVRN_BUILD_DASHBOARD)
         # QtCoro needs this for Qt 6.10 and (currently) doesn't do this by itself
         find_package(Qt6 REQUIRED COMPONENTS QmlPrivate)
     endif()
-
-    find_package(ECM 5.115 REQUIRED NO_MODULE)
-    list(APPEND CMAKE_MODULE_PATH "${ECM_MODULE_PATH}")
 
     find_package(KF6 REQUIRED COMPONENTS Kirigami I18n CoreAddons QQC2DesktopStyle IconThemes)
     find_package(KF6Kirigami)
@@ -339,6 +348,14 @@ if (WIVRN_BUILD_DASHBOARD)
 endif()
 
 add_subdirectory(tools)
+
+if(WIVRN_BUILD_TEST AND NEED_COMMON)
+    add_test(NAME install-prefix-consistency
+        COMMAND ${CMAKE_COMMAND}
+            "-DWIVRN_CONFIG_FILE=${CMAKE_CURRENT_BINARY_DIR}/common/wivrn_config.h"
+            "-DEXPECTED_PREFIX=${CMAKE_INSTALL_PREFIX}"
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/install_prefix_test.cmake)
+endif()
 
 foreach(TARGET_NAME wivrn wivrn-server wivrn-dashboard wivrn-common wivrn-dissector wivrnctl)
     if(TARGET ${TARGET_NAME})

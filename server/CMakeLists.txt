@@ -94,6 +94,7 @@ if (WIVRN_BUILD_SERVER)
 	add_executable(wivrn-server
 			accept_connection.cpp
 			active_runtime.cpp
+			utils/runtime_manifest.cpp
 			avahi_publisher.cpp
 			hostname.cpp
 			main.cpp
@@ -298,6 +299,13 @@ if (WIVRN_BUILD_SERVER)
 	target_compile_definitions(wivrn-server PRIVATE JSON_DIAGNOSTICS=1)
 
 	if(WIVRN_BUILD_TEST)
+		add_executable(runtime-manifest-test
+			utils/runtime_manifest.cpp
+			utils/runtime_manifest_test.cpp)
+		target_compile_features(runtime-manifest-test PRIVATE cxx_std_20)
+		target_compile_options(runtime-manifest-test PRIVATE -UNDEBUG)
+		add_test(NAME runtime-manifest COMMAND runtime-manifest-test)
+
 		add_executable(fsr-config-test
 			compositor/fsr_config.cpp
 			compositor/fsr_config_test.cpp)
